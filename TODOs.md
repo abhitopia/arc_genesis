@@ -1,0 +1,5 @@
+- [ ] Optimize and vectorize
+- [ ] Size variable
+- [ ] Decoder variant (start out with correct output size)
+- [ ] Categorical Decoder
+- [ ] Slot Diffusion decoder

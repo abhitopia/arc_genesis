@@ -19,9 +19,13 @@ class GECO():
     def __init__(self, goal, step_size, alpha=0.99, beta_init=1.0,
                  beta_min=1e-10, speedup=None):
         self.err_ema = None
+
+        # Traget reconstruction error
         self.goal = goal
-        self.step_size = step_size
+
+        # This controls how much the multiplier (beta) is adjusted during each iteration.
         self.alpha = alpha
+        self.step_size = step_size
         self.beta = torch.tensor(beta_init)
         self.beta_min = torch.tensor(beta_min)
         self.beta_max = torch.tensor(1e10)

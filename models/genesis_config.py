@@ -273,12 +273,12 @@ class Genesis(nn.Module):
     @staticmethod
     def x_loss(x, log_m_k, x_r_k, std, pixel_wise=False):
         # 1.) Sum over steps for per pixel & channel (ppc) losses
-        p_xr_stack = Normal(torch.stack(x_r_k, dim=4), std)
+        p_xr_stack = Normal(torch.stack(x_r_k, dim=4), std) # x_r_k: [B, 3, 64, 64, K]
         log_xr_stack = p_xr_stack.log_prob(x.unsqueeze(4))
         log_m_stack = torch.stack(log_m_k, dim=4)
         log_mx = log_m_stack + log_xr_stack
         # TODO(martin): use LogSumExp trick for numerical stability
-        err_ppc = -torch.log(log_mx.exp().sum(dim=4))
+        err_ppc = -torch.log(log_mx.exp().sum(dim=4)) # log_mx: [B, 3, 64, 64] are the -log probs
         # 2.) Sum accross channels and spatial dimensions
         if pixel_wise:
             return err_ppc
@@ -288,7 +288,7 @@ class Genesis(nn.Module):
     @staticmethod
     def mask_latent_loss(q_zm_0_k, zm_0_k, zm_k_k=None, ldj_k=None,
                          prior_lstm=None, prior_linear=None, debug=False):
-        num_steps = len(zm_0_k)
+        num_steps = len(zm_0_k) # zm_0_k: [B, F] (latents), num_steps = K
         batch_size = zm_0_k[0].size(0)
         latent_dim = zm_0_k[0].size(1)
         if zm_k_k is None:
@@ -298,16 +298,16 @@ class Genesis(nn.Module):
         if prior_lstm is not None and prior_linear is not None:
             # zm_seq shape: (att_steps-2, batch_size, ldim)
             # Do not need the last element in z_k
-            zm_seq = torch.cat(
+            zm_seq = torch.cat(  # zm_k_k: [K-1, B, F] (excludes the last component)
                 [zm.view(1, batch_size, -1) for zm in zm_k_k[:-1]], dim=0)
             # lstm_out shape: (att_steps-2, batch_size, state_size)
             # Note: recurrent state is handled internally by LSTM
-            lstm_out, _ = prior_lstm(zm_seq)
+            lstm_out, _ = prior_lstm(zm_seq) # predicts 2nd component to the last component priors
             # linear_out shape: (att_steps-2, batch_size, 2*ldim)
             linear_out = prior_linear(lstm_out)
             linear_out = torch.chunk(linear_out, 2, dim=2)
-            mu_raw = torch.tanh(linear_out[0])
-            sigma_raw = B.to_prior_sigma(linear_out[1])
+            mu_raw = torch.tanh(linear_out[0]) # keeps latent in [-1, 1]
+            sigma_raw = B.to_prior_sigma(linear_out[1]) # Keeps range of sigma in [1e-4, 1+1e-4]
             # Split into K steps, shape: (att_steps-2)*[1, batch_size, ldim]
             mu_k = torch.split(mu_raw, 1, dim=0)
             sigma_k = torch.split(sigma_raw, 1, dim=0)
@@ -326,11 +326,11 @@ class Genesis(nn.Module):
 
         # -- Compute KL using Monte Carlo samples for every step k --
         kl_m_k = []
-        for step, p_zm in enumerate(p_zm_k):
-            log_q = q_zm_0_k[step].log_prob(zm_0_k[step]).sum(dim=1)
-            log_p = p_zm.log_prob(zm_k_k[step]).sum(dim=1)
-            kld = log_q - log_p
-            if ldj_k is not None:
+        for step, p_zm in enumerate(p_zm_k): # zm_0_k: [B, F] (latents), zm_k_k: [B, F] (latents)
+            log_q = q_zm_0_k[step].log_prob(zm_0_k[step]).sum(dim=1) # sum across the latent dimension
+            log_p = p_zm.log_prob(zm_k_k[step]).sum(dim=1) # sum across the latent dimension
+            kld = log_q - log_p # [B]
+            if ldj_k is not None: # Log Determinant of Jacobian
                 ldj = ldj_k[step].sum(dim=1)
                 kld = kld - ldj
             kl_m_k.append(kld)

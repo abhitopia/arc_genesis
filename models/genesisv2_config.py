@@ -107,11 +107,11 @@ class GenesisV2(nn.Module):
         assert cfg.pixel_std1 == cfg.pixel_std2
         self.std = cfg.pixel_std1
 
-    def forward(self, x):
+    def forward(self, x): # x: [B, 3, 64, 64]
         batch_size, _, H, W = x.shape
 
         # --- Extract features ---
-        enc_feat, _ = self.encoder(x)
+        enc_feat, _ = self.encoder(x) # enc_feat: [B, 64, 64, 64]
         enc_feat = F.relu(enc_feat)
 
         # --- Predict attention masks ---
@@ -137,7 +137,7 @@ class GenesisV2(nn.Module):
                     self.seg_head(enc_feat), self.K_steps-1, dynamic_K=True)
         else:
             log_m_k, log_s_k, att_stats = self.att_process(
-                self.seg_head(enc_feat), self.K_steps-1, dynamic_K=False)
+                self.seg_head(enc_feat), self.K_steps-1, dynamic_K=False) # seg_head: [B, 64, 64, 64]
             if self.debug:
                 assert len(log_m_k) == self.K_steps
 
@@ -151,10 +151,10 @@ class GenesisV2(nn.Module):
             # Normalise
             obj_feat = obj_feat / (mask.sum((2, 3)) + 1e-5)
             # Posterior
-            mu, sigma_ps = self.z_head(obj_feat).chunk(2, dim=1)
-            sigma = B.to_sigma(sigma_ps)
-            q_z = Normal(mu, sigma)
-            z = q_z.rsample()
+            mu, sigma_ps = self.z_head(obj_feat).chunk(2, dim=1)  
+            sigma = B.to_sigma(sigma_ps) # softplus + 1e-8 to avoid log(0) range of softplus is [1e-8, inf]
+            q_z = Normal(mu, sigma) # Assumes diagonal covariance matrix for sigma
+            z = q_z.rsample() # "r"e-parameterized "sample"ing, uses the reparameterization trick to avoid the gradient flowing through the sampling process
             comp_stats['mu_k'].append(mu)
             comp_stats['sigma_k'].append(sigma)
             comp_stats['z_k'].append(z)
@@ -166,7 +166,7 @@ class GenesisV2(nn.Module):
         # --- Loss terms ---
         losses = AttrDict()
         # -- Reconstruction loss
-        losses['err'] = Genesis.x_loss(x, log_m_r_k, x_r_k, self.std)
+        losses['err'] = Genesis.x_loss(x, log_m_r_k, x_r_k, self.std) # Mixture model reconstruction
         mx_r_k = [x*logm.exp() for x, logm in zip(x_r_k, log_m_r_k)]
         # -- Optional: Attention mask loss
         if self.klm_loss:
@@ -204,13 +204,13 @@ class GenesisV2(nn.Module):
 
     def decode_latents(self, z_k):
         # --- Reconstruct components and image ---
-        x_r_k, m_r_logits_k = [], []
+        x_r_k, m_r_logits_k = [], [] # x_r_k: [B, 3, 64, 64] (RGB), m_r_logits_k: [B, 1, 64, 64] (alpha)
         for z in z_k:
-            dec = self.decoder_module(z)
+            dec = self.decoder_module(z) # z: [B, F] -> [B, 4, 64, 64] (RGB + alpha)
             x_r_k.append(dec[:, :3, :, :])
             m_r_logits_k.append(dec[:, 3: , :, :])
         # Optional: Apply pixelbound
-        if self.pixel_bound:
+        if self.pixel_bound: # sigmoid to [0, 1] so normalized to [0, 1]
             x_r_k = [torch.sigmoid(item) for item in x_r_k]
         # --- Reconstruct masks ---
         log_m_r_stack = MONet.get_mask_recon_stack(
@@ -220,7 +220,7 @@ class GenesisV2(nn.Module):
         # --- Reconstruct input image by marginalising (aka summing) ---
         x_r_stack = torch.stack(x_r_k, dim=4)
         m_r_stack = torch.stack(log_m_r_k, dim=4).exp()
-        recon = (m_r_stack * x_r_stack).sum(dim=4)
+        recon = (m_r_stack * x_r_stack).sum(dim=4) # Marginalize over the components K
 
         return recon, x_r_k, log_m_r_k
 

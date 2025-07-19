@@ -138,7 +138,7 @@ class MONet(nn.Module):
             if log:
                 return F.log_softmax(torch.stack(m_r_logits_k, dim=4), dim=4)
             return F.softmax(torch.stack(m_r_logits_k, dim=4), dim=4)
-        elif prior_mode == 'scope':
+        elif prior_mode == 'scope': # Stick Breaking Style
             log_m_r_k = []
             log_s = torch.zeros_like(m_r_logits_k[0])
             for step, logits in enumerate(m_r_logits_k):
@@ -156,6 +156,8 @@ class MONet(nn.Module):
 
     @staticmethod
     def kl_m_loss(log_m_k, log_m_r_k, debug=False):
+        # Masks are probs, so KL more appropriate than MSE, and more sensitive to relative differences across K
+        # Promotes consistency between the attention masks and the predicted masks
         if debug:
             assert len(log_m_k) == len(log_m_r_k)
         batch_size = log_m_k[0].size(0)

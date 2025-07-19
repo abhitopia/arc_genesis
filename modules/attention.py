@@ -161,34 +161,34 @@ class InstanceColouringSBP(nn.Module):
 
     def forward(self, features, steps_to_run, debug=False,
                 dynamic_K=False, *args, **kwargs):
-        batch_size = features.size(0)
+        batch_size = features.size(0) # features: [B, F, H, W]
         stats = AttrDict()
         if isinstance(features, tuple):
             features = features[0]
         if dynamic_K:
             assert batch_size == 1
-        # Get colours
-        colour_out = self.colour_head(features)
+        # Get colours, not just colour but a complex feature that includes positions
+        colour_out = self.colour_head(features) # colour_out: ([B, C, H, W], [B, 2, H, W])
         if isinstance(colour_out, tuple):
             colour, delta = colour_out
         else:
             colour, delta = colour_out, None
         # Sample from uniform to select random pixels as seeds
-        rand_pixel = torch.empty(batch_size, 1, *colour.shape[2:])
+        rand_pixel = torch.empty(batch_size, 1, *colour.shape[2:]) # rand_pixel: [B, 1, H, W]
         rand_pixel = rand_pixel.uniform_()
         # Run SBP
         seed_list = []
         log_m_k = []
-        log_s_k = [torch.zeros(batch_size, 1, self.img_size, self.img_size)]
+        log_s_k = [torch.zeros(batch_size, 1, self.img_size, self.img_size)]  # LogScope
         for step in range(steps_to_run):
-            # Determine seed
+            # Determine seed (Interpolation not needed as the color and scope are the same size)
             scope = F.interpolate(log_s_k[step].exp(), size=colour.shape[2:],
                                   mode='bilinear', align_corners=False)
-            pixel_probs = rand_pixel * scope
-            rand_max = pixel_probs.flatten(2).argmax(2).flatten()
+            pixel_probs = rand_pixel * scope # pixel_probs: [B, 1, H, W]
+            rand_max = pixel_probs.flatten(2).argmax(2).flatten()  # rand_max: [B] (max prob for each batch item)
             # TODO(martin): parallelise this
             seed = torch.empty((batch_size, self.colour_dim))
-            for bidx in range(batch_size):
+            for bidx in range(batch_size):  # Copy the feature vector corresponding the max prob for each batch item into the seed
                 seed[bidx, :] = colour.flatten(2)[bidx, :, rand_max[bidx]]
             seed_list.append(seed)
             # Compute masks
@@ -196,27 +196,27 @@ class InstanceColouringSBP(nn.Module):
                 distance = B.euclidian_distance(colour, seed)
                 alpha = torch.exp(- distance / self.log_sigma.exp())
             elif self.kernel == 'gaussian':
-                distance = B.squared_distance(colour, seed)
-                alpha = torch.exp(- distance / self.log_sigma.exp())
+                distance = B.squared_distance(colour, seed) # distance: [B, H, W] for each pixel i, j where vector is the color feature
+                alpha = torch.exp(- distance / self.log_sigma.exp()) # alpha: [B, H, W]
             elif self.kernel == 'epanechnikov':
                 distance = B.squared_distance(colour, seed)
                 alpha = (1 - distance / self.log_sigma.exp()).relu()
             else:
                 raise ValueError("No valid kernel.")
-            alpha = alpha.unsqueeze(1)
+            alpha = alpha.unsqueeze(1) # alpha: [B, 1, H, W]
             # Sanity checks
             if debug:
                 assert alpha.max() <= 1, alpha.max()
                 assert alpha.min() >= 0, alpha.min()
             # Clamp mask values to [0.01, 0.99] for numerical stability
             # TODO(martin): clamp less aggressively?
-            alpha = B.clamp_preserve_gradients(alpha, 0.01, 0.99)
+            alpha = B.clamp_preserve_gradients(alpha, 0.01, 0.99) # Values close to 0 has log prob and 1 with log(1-alpha)
             # SBP update
-            log_a = torch.log(alpha)
-            log_neg_a = torch.log(1 - alpha)
-            log_m = log_s_k[step] + log_a
-            if dynamic_K and log_m.exp().sum() < 20:
-                break
+            log_a = torch.log(alpha) # log_a: [B, 1, H, W]
+            log_neg_a = torch.log(1 - alpha) # log_neg_a: [B, 1, H, W]
+            log_m = log_s_k[step] + log_a # log_m: [B, 1, H, W]
+            if dynamic_K and log_m.exp().sum() < 20: # If the mask is too small, stop the loop
+                break # Consequtive masks are by design smaller than previous, 20 ~ 0.5% of the image size
             log_m_k.append(log_m)
             log_s_k.append(log_s_k[step] + log_neg_a)
         # Set mask equal to scope for last step

@@ -91,7 +91,7 @@ def load(cfg, **unused_kwargs):
     test_loader = DataLoader(test_dataset,
                              batch_size=cfg.batch_size,
                              shuffle=True,
-                             num_workers=1)
+                             num_workers=cfg.num_workers)
 
     # Throughput stats
     if not cfg.debug:
