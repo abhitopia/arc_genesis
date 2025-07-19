@@ -7,7 +7,7 @@ import tempfile
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 import numpy as np
@@ -398,6 +398,114 @@ def create_dataset(num_samples=1000, min_h=5, min_w=5, max_h=32, max_w=32,
     return dataset
 
 
+def collate_variable_size(batch, max_h=None, max_w=None, padding_value=-1):
+    """
+    Custom collate function for variable-sized images.
+    Pads all images and masks to the same size.
+    
+    Args:
+        batch: List of samples from dataset
+        max_h, max_w: Maximum dimensions to pad to. If None, uses batch maximum.
+        padding_value: Value to use for padding images (e.g., 0, -1)
+        
+    Returns:
+        Batch dictionary with padded tensors and padding mask
+    """
+    # Extract images and masks
+    images = [sample['input'] for sample in batch]
+    masks = [sample['target'] for sample in batch]
+    
+    # Determine target size
+    if max_h is None or max_w is None:
+        # Find maximum dimensions in this batch
+        batch_max_h = max(img.shape[-2] for img in images)
+        batch_max_w = max(img.shape[-1] for img in images)
+        target_h = max_h if max_h is not None else batch_max_h
+        target_w = max_w if max_w is not None else batch_max_w
+    else:
+        target_h, target_w = max_h, max_w
+    
+    # Pad images and masks, create padding masks
+    padded_images = []
+    padded_masks = []
+    padding_masks = []
+    
+    for img, mask in zip(images, masks):
+        # Get current dimensions
+        if img.dim() == 3:  # (C, H, W)
+            _, curr_h, curr_w = img.shape
+        else:  # (H, W) for discrete
+            curr_h, curr_w = img.shape
+        
+        # Calculate padding
+        pad_h = target_h - curr_h
+        pad_w = target_w - curr_w
+        
+        # Create padding mask (True = real image, False = padding)
+        padding_mask = torch.ones((target_h, target_w), dtype=torch.bool)
+        if pad_h > 0 or pad_w > 0:
+            # Set padding regions to False
+            if pad_h > 0:
+                padding_mask[curr_h:, :] = False
+            if pad_w > 0:
+                padding_mask[:, curr_w:] = False
+        
+        # Pad image
+        if img.dim() == 3:  # RGB images (C, H, W)
+            padded_img = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=padding_value)
+        else:  # Discrete images (H, W)
+            padded_img = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=padding_value)
+        
+        # Pad target mask (C, H, W) where C = num_colors - always pad with 0
+        padded_mask = F.pad(mask, (0, pad_w, 0, pad_h), mode='constant', value=0)
+        
+        padded_images.append(padded_img)
+        padded_masks.append(padded_mask)
+        padding_masks.append(padding_mask)
+    
+    # Stack into batch tensors
+    if padded_images[0].dim() == 3:  # RGB images
+        batch_images = torch.stack(padded_images)
+    else:  # Discrete images - need to add channel dimension
+        batch_images = torch.stack([img.unsqueeze(0) for img in padded_images])
+    
+    batch_masks = torch.stack(padded_masks)
+    batch_padding_masks = torch.stack(padding_masks)
+    
+    return {
+        'input': batch_images,
+        'target': batch_masks,
+        'mask': batch_padding_masks
+    }
+
+
+def create_dataloader(dataset, batch_size=32, max_h=None, max_w=None, padding_value=0, shuffle=True, num_workers=0):
+    """
+    Create a DataLoader with custom collate function for variable-sized images.
+    
+    Args:
+        dataset: VariableDSpritesDataset instance
+        batch_size: Batch size
+        max_h, max_w: Maximum dimensions to pad to. If None, uses batch maximum.
+        padding_value: Value to use for padding images (e.g., 0, -1)
+        shuffle: Whether to shuffle the data
+        num_workers: Number of worker processes
+        
+    Returns:
+        DataLoader instance
+    """
+    def collate_fn(batch):
+        return collate_variable_size(batch, max_h=max_h, max_w=max_w, padding_value=padding_value)
+    
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_fn
+    )
+
+
 def visualize_samples(dataset, num_samples=5):
     """
     Visualize the first few samples from the dataset.
@@ -463,7 +571,7 @@ def main():
         max_h=32,
         max_w=32,
         num_colors=10,
-        is_discrete=True,
+        is_discrete=False,
         seed=44
     )
     
@@ -483,6 +591,47 @@ def main():
     # Visualize first 5 samples
     print("\nVisualizing first 5 samples...")
     visualize_samples(dataset, num_samples=5)
+    
+    # Demonstrate DataLoader usage
+    print("\nTesting DataLoader...")
+    dataloader = create_dataloader(
+        dataset, 
+        batch_size=4, 
+        max_h=32, 
+        max_w=32, 
+        padding_value=-1,  # Use -1 for padding
+        shuffle=True
+    )
+    
+    # Get a batch
+    batch = next(iter(dataloader))
+    print(f"Batch input shape: {batch['input'].shape}")
+    print(f"Batch target shape: {batch['target'].shape}")
+    print(f"Batch mask shape: {batch['mask'].shape}")
+    print(f"Input dtype: {batch['input'].dtype}")
+    print(f"Target dtype: {batch['target'].dtype}")
+    print(f"Mask dtype: {batch['mask'].dtype}")
+    
+    # Show padding statistics
+    mask = batch['mask'][0]  # First sample's padding mask
+    total_pixels = mask.numel()
+    real_pixels = mask.sum().item()
+    padding_pixels = total_pixels - real_pixels
+    print(f"Sample 0: {real_pixels}/{total_pixels} real pixels, {padding_pixels} padding pixels")
+    
+    # Check padding values
+    # Need to expand mask to match image channels
+    first_image = batch['input'][0]  # Shape: (C, H, W)
+    if first_image.dim() == 3:  # RGB/multi-channel image
+        expanded_mask = mask.unsqueeze(0).expand_as(first_image)  # (C, H, W)
+        padded_regions = first_image[~expanded_mask]
+    else:  # Single channel image
+        padded_regions = first_image[~mask]
+    
+    if len(padded_regions) > 0:
+        print(f"Padding values in input: {torch.unique(padded_regions)}")
+    else:
+        print("No padding in first sample")
     
     print("Example completed!")
 
