@@ -359,6 +359,32 @@ class VariableDSpritesDataset(Dataset):
             'input': img,
             'target': mask
         }
+    
+
+    def create_dataloader(self, batch_size=32, max_h=None, max_w=None, padding_value=0, shuffle=True, num_workers=0):
+        """
+        Create a DataLoader with custom collate function for variable-sized images.
+        
+        Args:
+            batch_size: Batch size
+            max_h, max_w: Maximum dimensions to pad to. If None, uses batch maximum.
+            padding_value: Value to use for padding images (e.g., 0, -1)
+            shuffle: Whether to shuffle the data
+            num_workers: Number of worker processes
+            
+        Returns:
+            DataLoader instance
+        """
+        def collate_fn(batch):
+            return collate_variable_size(batch, max_h=max_h, max_w=max_w, padding_value=padding_value)
+        
+        return DataLoader(
+            self,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            collate_fn=collate_fn
+        )
 
 
 def create_dataset(num_samples=1000, min_h=5, min_w=5, max_h=32, max_w=32,
@@ -479,31 +505,7 @@ def collate_variable_size(batch, max_h=None, max_w=None, padding_value=-1):
     }
 
 
-def create_dataloader(dataset, batch_size=32, max_h=None, max_w=None, padding_value=0, shuffle=True, num_workers=0):
-    """
-    Create a DataLoader with custom collate function for variable-sized images.
-    
-    Args:
-        dataset: VariableDSpritesDataset instance
-        batch_size: Batch size
-        max_h, max_w: Maximum dimensions to pad to. If None, uses batch maximum.
-        padding_value: Value to use for padding images (e.g., 0, -1)
-        shuffle: Whether to shuffle the data
-        num_workers: Number of worker processes
-        
-    Returns:
-        DataLoader instance
-    """
-    def collate_fn(batch):
-        return collate_variable_size(batch, max_h=max_h, max_w=max_w, padding_value=padding_value)
-    
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
+
 
 
 def visualize_samples(dataset, num_samples=5):
@@ -594,8 +596,7 @@ def main():
     
     # Demonstrate DataLoader usage
     print("\nTesting DataLoader...")
-    dataloader = create_dataloader(
-        dataset, 
+    dataloader = dataset.create_dataloader(
         batch_size=4, 
         max_h=32, 
         max_w=32, 
