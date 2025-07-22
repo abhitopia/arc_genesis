@@ -77,7 +77,7 @@ class StickBreakingSegmentation(nn.Module):
         self.feature_head = SemiConv(inp_channels, out_channels, img_size)
 
 
-    def forward(self, x, dynamic=False, max_steps=None):
+    def forward(self, x, max_steps=None, dynamic=False):
         """
         Args:
             x: torch.Tensor, shape [B, inp_channels, H, W]
