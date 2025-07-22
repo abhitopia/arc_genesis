@@ -1,55 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from .coord_modules import SemiConv
 
-
-class SemiConv(nn.Module):
-    """
-    SemiConv is gated convolution layer along with normalized pixel coordinates. 
-    Coordinates break the translation invariance of the convolution and embeds positional information.
-    """
-    def __init__(self, inp_channels, out_channels, img_size, gate_init=0.0):
-        super(SemiConv, self).__init__()
-        self.conv = nn.Conv2d(inp_channels, out_channels, 1)
-        assert out_channels > 2, "out_channels must be greater than 2"
-
-        # Biased to use pixel coordinates initially by setting gate to 0.0
-        self.gate = nn.Parameter(torch.tensor(gate_init)) 
-        coords = self.pixel_coords_2d(img_size)
-        zeros = torch.zeros(1, out_channels-2, img_size, img_size)
-        self.uv = torch.cat((zeros, coords), dim=1)
-
-    @staticmethod
-    def pixel_coords_2d(img_size):
-        """
-        Args:
-            img_size: int, size of the image
-        Returns:
-            coords: torch.Tensor, 2D pixel coordinates in the range [-1, 1]
-                of shape [1, 2, H, W]
-        """
-        g_1, g_2 = torch.meshgrid(torch.linspace(-1, 1, img_size),
-                              torch.linspace(-1, 1, img_size))
-        g_1 = g_1.view(1, 1, img_size, img_size)
-        g_2 = g_2.view(1, 1, img_size, img_size)
-        return torch.cat((g_1, g_2), dim=1)
-
-    def forward(self, x):
-        """
-        Args:
-            x: torch.Tensor, shape [B, inp_channels, H, W]
-        Returns:
-            out: torch.Tensor, shape [B, out_channels, H, W]
-            delta: torch.Tensor, shape [B, 2, H, W]
-        """
-        # gate is initialized to 0.0 which means convolution is initiatially disabled
-        # and the output relies solely on the pixel coordinates but that should change during training
-        out = self.gate * self.conv(x)
-
-        # delta is the last 2 channels of the output which modify the static pixel coordinates
-        delta = out[:, -2:, :, :] # [B, 2, H, W]
-        return out + self.uv.to(out.device), delta
-    
 
 class StickBreakingSegmentation(nn.Module):
     """
