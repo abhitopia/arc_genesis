@@ -39,8 +39,7 @@ class UNet(nn.Module):
     proper output channel mapping, and MLP bottleneck.
     """
 
-    def __init__(self, in_chnls, out_chnls, img_size, num_blocks=None, 
-                 filter_start=32, norm='gn'):
+    def __init__(self, in_chnls, out_chnls, img_size, num_blocks=None, norm='gn'):
         """
         Initialises an optimized U-Net model with MLP bottleneck.
 
