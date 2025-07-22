@@ -6,6 +6,7 @@ from ..modules.unet import UNet, ConvGNReLU
 from ..modules.masks_stickbreaking import StickBreakingSegmentation
 from ..modules.latent_decoder import LatentDecoder
 from ..modules.mixture_model import normal_mixture_loss
+from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 class GenesisV2Config:
     K_steps: int = 5
@@ -16,6 +17,7 @@ class GenesisV2Config:
     broadcast_size: int = 4
     add_coords_every_layer: bool = False
     normal_std: float = 0.7     # std for normal distribution for the mixture model
+    lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
@@ -58,6 +60,11 @@ class GenesisV2(nn.Module):
             feat_dim=config.feat_dim,
             add_coords_every_layer=config.add_coords_every_layer)
         
+        # Autoregressive KL loss module
+        self.kl_loss = AutoregressiveKLLoss(
+            latent_dim=config.feat_dim,
+            hidden_dim=config.lstm_hidden_dim)
+     
 
     def encode(self, x, max_steps=None, dynamic=False):
         x_enc = self.encoder(x) # [B, feat_dim, H, W]
@@ -66,9 +73,9 @@ class GenesisV2(nn.Module):
         masks, scopes = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K_steps, H, W]
         
         # Vectorized object feature extraction and latent computation
-        z_k, mu_k, sigma_k = self.compute_latents(x_enc, masks)
+        z_k, q_z_k = self.compute_latents(x_enc, masks)
 
-        return z_k, masks
+        return z_k, q_z_k, masks
     
 
     def decode(self, z_k):
@@ -94,16 +101,27 @@ class GenesisV2(nn.Module):
         """
         x: [B, C, H, W]  # C = 3 for RGB input channels
         """
-        z_k, masks = self.encode(x, max_steps=max_steps, dynamic=dynamic) # [B, K, F], [B, K, H, W]
+        z_k, q_z_k, masks = self.encode(x, max_steps=max_steps, dynamic=dynamic) # [B, K, F], [B, K, H, W], Normal([B, K, F])
         recon_k, log_alpha_k = self.decode(z_k) # [B, K, C/1, H, W]
 
         # Reconstruct image by marginalizing over K objects
         recon = (recon_k * log_alpha_k.exp()).sum(dim=1) # [B, C, H, W]
 
         # Compute mixture loss
-        loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
+        mixture_loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
 
-        return loss
+        # Compute KL loss if autoregressive prior
+        kl_loss, _ = self.kl_loss(q_z_k, z_k, sum_k=True) # [B]
+
+        return {
+            'mixture_loss': mixture_loss,
+            'kl_loss': kl_loss,
+            'reconstruction': recon,
+            'masks': masks,
+            'object_reconstructions': recon_k,
+            'log_alpha': log_alpha_k,
+            'latents': z_k
+        }
     
 
     
@@ -116,9 +134,8 @@ class GenesisV2(nn.Module):
             masks: [B, K, H, W] - probability masks
             
         Returns:
-            mu_k: [B, K, F] - means for each object 
-            sigma_k: [B, K, F] - sigmas for each object
             z_k: [B, K, F] - sampled latents for each object
+            q_z_k: Vectorized Normal distribution [B, K, F] - posterior distribution
         """
         # masks are already in regular probability space
         
@@ -150,11 +167,11 @@ class GenesisV2(nn.Module):
         # Convert logits to positive sigma values using softplus + small epsilon
         sigma = torch.nn.functional.softplus(sigma_logits + 0.5) + 1e-8 # [B, K, F]
         
-        # Sample latents using reparameterization trick
-        q_z = Normal(mu, sigma)
-        z = q_z.rsample()  # [B, K, F]
+        # Sample latents using reparameterization trick (vectorized)
+        q_z_k = Normal(mu, sigma)  # Vectorized Normal distribution [B, K, F]
+        z_k = q_z_k.rsample()  # [B, K, F]
         
-        return z, mu, sigma
+        return z_k, q_z_k
 
 
 if __name__ == "__main__":
@@ -164,15 +181,22 @@ if __name__ == "__main__":
 
     # Test the model
     x = torch.randn(1, 3, 64, 64)
-    print(x.shape)
-    recon, masks, scopes, mu_k, sigma_k, z_k, recon_k, log_alpha_k, loss = model(x)
-    print(f"Reconstruction: {recon.shape}")
-    print(f"Masks: {masks.shape}")
-    print(f"Scopes: {scopes.shape}")
-    print(f"Mu: {mu_k.shape}")
-    print(f"Sigma: {sigma_k.shape}")
-    print(f"Z: {z_k.shape}")
-    print(f"Object reconstructions: {recon_k.shape}")
-    print(f"Log alpha: {log_alpha_k.shape}")
-    print(f"Mixture loss: {loss.shape}")
-    print(f"Mixture loss value: {loss.item()}")
+    print(f"Input shape: {x.shape}")
+    
+    # Forward pass
+    results = model(x)
+    
+    print(f"Total loss: {results['loss'].shape}")
+    print(f"Mixture loss: {results['mixture_loss'].shape}")
+    print(f"Reconstruction: {results['reconstruction'].shape}")
+    print(f"Masks: {results['masks'].shape}")
+    print(f"Object reconstructions: {results['object_reconstructions'].shape}")
+    print(f"Log alpha: {results['log_alpha'].shape}")
+    print(f"Latents: {results['latents'].shape}")
+    
+    if results['kl_losses'] is not None:
+        print(f"Number of KL losses: {len(results['kl_losses'])}")
+        print(f"KL loss shapes: {[kl.shape for kl in results['kl_losses']]}")
+        
+    print(f"Total loss value: {results['loss'].item()}")
+    print(f"Mixture loss value: {results['mixture_loss'].item()}")
