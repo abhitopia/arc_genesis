@@ -103,7 +103,11 @@ class StickBreakingSegmentation(nn.Module):
         log_masks = torch.stack(log_masks, dim=1).squeeze(2) # [B, K_steps, H, W]
         log_scopes = torch.stack(log_scopes, dim=1).squeeze(2) # [B, K_steps, H, W]
         
-        return log_masks, log_scopes
+        # Convert back to regular probability space
+        masks = log_masks.exp() # [B, K_steps, H, W]
+        scopes = log_scopes.exp() # [B, K_steps, H, W]
+        
+        return masks, scopes
 
 
 if __name__ == "__main__":
