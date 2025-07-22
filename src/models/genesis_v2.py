@@ -5,7 +5,7 @@ from torch.distributions.normal import Normal
 from ..modules.unet import UNet, ConvGNReLU
 from ..modules.masks_stickbreaking import StickBreakingSegmentation
 from ..modules.latent_decoder import LatentDecoder
-from ..modules.mixture_model import normal_mixture_loss
+from ..modules.losses import normal_mixture_loss, categorical_kl_loss
 from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 class GenesisV2Config:
@@ -18,6 +18,8 @@ class GenesisV2Config:
     add_coords_every_layer: bool = False
     normal_std: float = 0.7     # std for normal distribution for the mixture model
     lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
+    klm_loss: bool = False      # whether to use mask KL loss
+    detach_mr_in_klm: bool = True  # whether to detach reconstructed masks in KL loss
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
@@ -61,7 +63,7 @@ class GenesisV2(nn.Module):
             add_coords_every_layer=config.add_coords_every_layer)
         
         # Autoregressive KL loss module
-        self.kl_loss = AutoregressiveKLLoss(
+        self.latent_kl_loss = AutoregressiveKLLoss(
             latent_dim=config.feat_dim,
             hidden_dim=config.lstm_hidden_dim)
      
@@ -111,11 +113,22 @@ class GenesisV2(nn.Module):
         mixture_loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
 
         # Compute KL loss if autoregressive prior
-        kl_loss, _ = self.kl_loss(q_z_k, z_k, sum_k=True) # [B]
+        latent_kl_loss, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=True) # [B]
 
+        # Compute mask KL loss if enabled
+        mask_kl_loss_val = None
+        if self.config.klm_loss:
+            mask_kl_loss_val = categorical_kl_loss(
+                q_probs=masks, 
+                p_probs=log_alpha_k.squeeze(2).exp(),  # [B, K, H, W]
+                detach_p=self.config.detach_mr_in_klm
+            ) # [B]
+
+        import ipdb; ipdb.set_trace()
         return {
             'mixture_loss': mixture_loss,
-            'kl_loss': kl_loss,
+            'latent_kl_loss': latent_kl_loss,
+            'mask_kl_loss': mask_kl_loss_val,
             'reconstruction': recon,
             'masks': masks,
             'object_reconstructions': recon_k,
