@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 from ..modules.unet import UNet, ConvGNReLU
 from ..modules.masks_stickbreaking import StickBreakingSegmentation
+from ..modules.latent_decoder import LatentDecoder
 
 class GenesisV2Config:
     K_steps: int = 5
@@ -10,12 +12,16 @@ class GenesisV2Config:
     img_size: int = 64
     feat_dim: int = 64
     kernel: str = 'gaussian'
+    broadcast_size: int = 4
+    add_coords_every_layer: bool = False
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
         super(GenesisV2, self).__init__()
         self.config = config
-        self.encoder = nn.Sequential(UNet(in_chnls=config.in_chnls, 
+        self.in_channels = config.in_chnls
+        self.img_size = config.img_size
+        self.encoder = nn.Sequential(UNet(in_chnls=self.in_channels, 
                         out_chnls=config.feat_dim, 
                         img_size=config.img_size),
                         nn.ReLU())
@@ -40,6 +46,15 @@ class GenesisV2(nn.Module):
             nn.Linear(2*config.feat_dim, 2*config.feat_dim),
             nn.ReLU(inplace=True),
             nn.Linear(2*config.feat_dim, 2*config.feat_dim))
+        
+        # Decoder
+        self.decoder = LatentDecoder(
+            input_channels=config.feat_dim,
+            output_channels=self.in_channels + 1, # RGB + alpha
+            output_size=config.img_size,
+            broadcast_size=config.broadcast_size,
+            feat_dim=config.feat_dim,
+            add_coords_every_layer=config.add_coords_every_layer)
 
     def forward(self, x, max_steps=None, dynamic=False):
         """
@@ -51,11 +66,32 @@ class GenesisV2(nn.Module):
         log_masks, log_scopes = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K_steps, H, W]
         
         # Vectorized object feature extraction and latent computation
-        mu_k, sigma_k, z_k = self.extract_object_features(x_enc, log_masks)
-        
-        return log_masks, log_scopes, mu_k, sigma_k, z_k
+        z_k, mu_k, sigma_k = self.compute_latents(x_enc, log_masks)
+
+        # Decode latents
+        B, K, D = z_k.shape
+        z_k_flat = z_k.view(-1, D)  # [B*K, D]
+        dec = self.decoder(z_k_flat)  # [B*K, in_channels + 1, H, W]
+        dec = dec.view(B, K, -1, self.img_size, self.img_size)  # [B, K, C, H, W]
+
+        # Split into RGB and alpha
+        recon_k_logits, alpha_k_logits = dec.split([self.in_channels, 1], dim=2) # [B, K, C, H, W]
+
+        # Ensure that the range of color is [0, 1] for each of K objects
+        recon_k = torch.sigmoid(recon_k_logits) # [B, K, C, H, W]
+
+        # Normalize Alpha across K objects
+        log_alpha_k = F.log_softmax(alpha_k_logits, dim=1) # [B, K, 1, H, W]
+
+        # Reconstruct image by marginalizing over K objects
+        recon = (recon_k * log_alpha_k.exp()).sum(dim=1) # [B, C, H, W]
+
+
+        import ipdb; ipdb.set_trace()
+
+        return recon, log_masks, log_scopes, mu_k, sigma_k, z_k
     
-    def extract_object_features(self, enc_feat, log_masks):
+    def compute_latents(self, enc_feat, log_masks):
         """
         Vectorized computation of object features and latents
         
@@ -68,9 +104,6 @@ class GenesisV2(nn.Module):
             sigma_k: [B, K, F] - sigmas for each object
             z_k: [B, K, F] - sampled latents for each object
         """
-        B, F, H, W = enc_feat.shape
-        B, K, H, W = log_masks.shape
-        
         # Convert log masks to masks
         masks = log_masks.exp()  # [B, K, H, W]
         
@@ -106,7 +139,7 @@ class GenesisV2(nn.Module):
         q_z = Normal(mu, sigma)
         z = q_z.rsample()  # [B, K, F]
         
-        return mu, sigma, z
+        return z, mu, sigma
 
 
 if __name__ == "__main__":
