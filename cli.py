@@ -104,7 +104,7 @@ def train(
         help="Override max_steps for quick debugging"
     ),
     num_workers: int = typer.Option(
-        4,
+        8,
         "--num-workers", "-NW",
         help="Override number of data loading workers"
     )

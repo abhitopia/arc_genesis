@@ -511,7 +511,7 @@ class VariableDSpritesDataset(Dataset):
 class VariableDSpritesConfig:
     """Configuration for variable-sized dSprites dataset."""
     
-    num_train: int = 128*1000
+    num_train: int = 128*500
     num_val: int = 2048
     num_test: int = 2048
     min_size: int = 32
