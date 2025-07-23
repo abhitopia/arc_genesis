@@ -39,6 +39,7 @@ save_dir: ./experiments
 # Logging & Checkpointing
 log_every_n_steps: 10
 val_check_interval: 1000 # Validate every 10 steps
+num_visualizations: 8
 save_top_k: 3
 monitor_metric: "loss_val/total_loss"
 monitor_mode: min

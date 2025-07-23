@@ -502,7 +502,8 @@ class VariableDSpritesDataset(Dataset):
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=use_fast_loading,
-            persistent_workers=use_fast_loading
+            persistent_workers=use_fast_loading,
+            drop_last=True
         )
 
 

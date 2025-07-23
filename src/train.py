@@ -125,6 +125,7 @@ class ExperimentConfig:
     # Logging
     log_every_n_steps: int = 10
     val_check_interval: float = 500  # Check validation every 500 steps
+    num_visualizations: int = 8
     
     # Checkpointing
     save_top_k: int = 3
@@ -319,7 +320,7 @@ class TrainingModule(pl.LightningModule):
         
         # On the first validation batch of each epoch, log visualizations
         if batch_idx == 0:
-            self.log_visualizations(batch, output)
+            self.log_visualizations(batch, output, max_samples=self.config.num_visualizations)
             
         return loss
         
@@ -329,9 +330,7 @@ class TrainingModule(pl.LightningModule):
         if not self.logger or not isinstance(self.logger, WandbLogger):
             print("[DEBUG] No Wandb logger found, skipping visualization.")
             return
-            
-        print(f"[DEBUG] Preparing to log {max_samples} visualization samples...")
-        
+                    
         for i in range(max_samples):
             image = batch['image'][i]
             recon = output['recon'][i]
