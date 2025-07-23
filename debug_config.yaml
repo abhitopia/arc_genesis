@@ -11,9 +11,9 @@ model:
   lstm_hidden_dim: 256
   detach_recon_masks: true
 training:
-  batch_size: 32
-  max_steps: 10000
-  learning_rate: 0.001
+  batch_size: 8
+  max_steps: 101  # Run for a small number of steps to trigger validation
+  learning_rate: 1.0e-3
   weight_decay: 0.0
   use_lr_scheduler: true
   lr_schedule_patience: 5
@@ -32,9 +32,13 @@ data:
   variable_size: false
   is_discrete: true
   seed: 42
-project_name: genesis_v2
-run_name: test_run
-save_dir: ./experiments
+
+# Experiment Metadata
+project_name: "genesis_v2_debug"
+run_name: "debug_visualization_test"
+save_dir: "./experiments"
+
+# Logging & Checkpointing
 log_every_n_steps: 10
 val_check_interval: 500
 save_top_k: 3

@@ -1,3 +1,5 @@
+# Debug configuration for rapid testing of visualization logging
+
 model:
   model_type: genesis_v2
   K_steps: 5
@@ -11,8 +13,8 @@ model:
   lstm_hidden_dim: 256
   detach_recon_masks: true
 training:
-  batch_size: 32
-  max_steps: 10000
+  batch_size: 4
+  max_steps: 11  # Run for just over one validation cycle
   learning_rate: 0.001
   weight_decay: 0.0
   use_lr_scheduler: true
@@ -32,11 +34,13 @@ data:
   variable_size: false
   is_discrete: false
   seed: 42
-project_name: genesis_v2
-run_name: test_run
+# Experiment Metadata
+project_name: "genesis_v2_debug"
+run_name: "debug_visualization_final_test"
 save_dir: ./experiments
+# Logging & Checkpointing
 log_every_n_steps: 10
-val_check_interval: 500
-save_top_k: 3
-monitor_metric: loss_val/total_loss
+val_check_interval: 10 # Validate every 10 steps
+save_top_k: 1
+monitor_metric: "loss_val/total_loss"
 monitor_mode: min

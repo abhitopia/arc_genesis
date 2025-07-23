@@ -28,6 +28,45 @@ def _to_numpy(img: torch.Tensor) -> "np.ndarray":  # type: ignore
 # Public API
 # -----------------------------------------------------------------------------
 
+def extract_slot_stats_for_sample(
+    output: Dict[str, torch.Tensor],
+    sample_idx: int = 0
+) -> Dict[str, List[torch.Tensor]]:
+    """Extract per-slot statistics for a single sample from a batched model output."""
+    K = output['masks_k'].shape[1]
+
+    slot_stats = {
+        'scopes_k': [],
+        'masks_k': [],
+        'alpha_k': [],
+        'recon_k': []
+    }
+
+    # Ensure all required keys are present
+    required_keys = ['masks_k', 'alpha_k', 'recon_k']
+    if 'scopes_k' in output:
+        required_keys.append('scopes_k')
+        
+    for key in required_keys:
+        if key not in output:
+            raise KeyError(f"Required key '{key}' not found in model output for visualization.")
+
+    for k in range(K):
+        # Scopes: [B, K, H, W] -> (1, H, W)
+        if 'scopes_k' in output:
+            slot_stats['scopes_k'].append(output['scopes_k'][sample_idx, k:k+1])
+        
+        # Attention masks: [B, K, H, W] -> (1, H, W)
+        slot_stats['masks_k'].append(output['masks_k'][sample_idx, k:k+1])
+        
+        # Decoder masks: [B, K, H, W] -> (1, H, W)
+        slot_stats['alpha_k'].append(output['alpha_k'][sample_idx, k:k+1])
+        
+        # Appearance reconstructions: [B, K, C, H, W] -> (C, H, W)
+        slot_stats['recon_k'].append(output['recon_k'][sample_idx, k])
+    
+    return slot_stats
+
 def make_slot_figure(
     image: torch.Tensor,
     recon: torch.Tensor,

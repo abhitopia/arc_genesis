@@ -7,11 +7,15 @@ from typing import Optional, Dict, Any, Tuple, Union
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
+from pytorch_lightning.loggers import WandbLogger
+import wandb
 
 # Import our modules
 from .data.d_sprites import VariableDSpritesConfig
 from .models.genesis_v2 import GenesisV2Config, GenesisV2
 from .modules.geco import create_geco_for_image_size
+from utils.visualisation import make_slot_figure, extract_slot_stats_for_sample
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -308,21 +312,52 @@ class TrainingModule(pl.LightningModule):
     
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Validation step."""
-        # Get loss, metrics, and full output for visualization
         loss, metrics, output, elbo_diverged = self._compute_loss(batch, mode="val")
         
         # Log metrics
         self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         
-        # TODO: Add visualization code for GenesisV2 outputs
-        # This could include:
-        # - Input images
-        # - Reconstructions 
-        # - Object masks
-        # - Object reconstructions
-        # - Instance segmentations
-        
+        # On the first validation batch of each epoch, log visualizations
+        if batch_idx == 0:
+            self.log_visualizations(batch, output)
+            
         return loss
+        
+    def log_visualizations(self, batch: Dict[str, torch.Tensor], output: Dict[str, torch.Tensor], max_samples: int = 2):
+        """Log visualizations to Wandb."""
+        # Ensure we have a logger and it's Wandb
+        if not self.logger or not isinstance(self.logger, WandbLogger):
+            print("[DEBUG] No Wandb logger found, skipping visualization.")
+            return
+            
+        print(f"[DEBUG] Preparing to log {max_samples} visualization samples...")
+        
+        for i in range(max_samples):
+            image = batch['image'][i]
+            recon = output['recon'][i]
+            
+            # Extract the slot statistics for this specific sample
+            slot_stats = extract_slot_stats_for_sample(output, sample_idx=i)
+            
+            # Create the figure with a smaller size
+            fig = make_slot_figure(
+                image=image,
+                recon=recon,
+                slot_stats=slot_stats,
+                max_slots=self.config.model.K_steps,
+                figsize_per_slot=(1.5, 1.5)  # Make figure smaller
+            )    
+      
+            # Log to Wandb with a lower DPI for smaller file size
+            try:
+                self.logger.experiment.log({
+                    f"Viz/val_sample_{i}": wandb.Image(fig, caption=f"Sample {i}"),
+                    "global_step": self.global_step
+                })
+            except Exception as e:
+                print(f"[DEBUG] ERROR logging val_sample_{i} to Wandb: {e}")
+            finally:
+                plt.close(fig)
     
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step."""
