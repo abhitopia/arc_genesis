@@ -205,8 +205,8 @@ def train(
     num_train_batches = len(datamodule.train_dataloader())
     
     # Ensure val_check_interval is not greater than the number of batches
-    if config.training.val_check_interval > num_train_batches:
-        config.training.val_check_interval = num_train_batches
+    if config.val_check_interval > num_train_batches:
+        config.val_check_interval = num_train_batches
         typer.echo(f"   Override: val_check_interval adjusted to {num_train_batches} (number of batches in train set)")
 
     # Create model
