@@ -155,6 +155,10 @@ def train(
     # Apply max_steps override if provided (for debugging)
     if max_steps is not None:
         config.training.max_steps = max_steps
+        # For very short debug runs, adjust logging frequency to ensure we see metrics
+        if max_steps <= 10:
+            config.log_every_n_steps = 1
+            typer.echo(f"   Override: log_every_n_steps = 1 (adjusted for short debug run)")
         typer.echo(f"   Override: max_steps = {max_steps}")
     
     # Print configuration summary
