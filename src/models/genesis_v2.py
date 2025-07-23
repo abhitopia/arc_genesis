@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
+from dataclasses import dataclass
 from ..modules.unet import UNet, ConvGNReLU
 from ..modules.masks_stickbreaking import StickBreakingSegmentation
 from ..modules.latent_decoder import LatentDecoder
 from ..modules.losses import normal_mixture_loss, categorical_kl_loss
 from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
+@dataclass
 class GenesisV2Config:
     K_steps: int = 5
     in_chnls: int = 3
