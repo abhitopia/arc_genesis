@@ -70,6 +70,9 @@ class TrainingConfig:
     # Regularization control
     use_mask_kl_loss: bool = True  # Whether to include mask KL regularization
     
+    # Training stability
+    elbo_divergence_threshold: float = 1e8  # Stop training if ELBO exceeds this
+    
     # GECO (Generalized ELBO Constrained Optimization) parameters
     geco_goal: float = 0.5655  # Target reconstruction error per pixel
     geco_lr: float = 1e-5      # GECO learning rate for beta updates
@@ -122,7 +125,7 @@ class ExperimentConfig:
     
     # Checkpointing
     save_top_k: int = 3
-    monitor_metric: str = "loss/val_total_loss"  # For checkpointing
+    monitor_metric: str = "loss_val/total_loss"  # For checkpointing
     monitor_mode: str = "min"
 
 
@@ -215,6 +218,7 @@ class TrainingModule(pl.LightningModule):
             "parameters/batch_size": self.config.training.batch_size,
             "parameters/max_steps": self.config.training.max_steps,
             "parameters/use_mask_kl_loss": self.config.training.use_mask_kl_loss,
+            "parameters/elbo_divergence_threshold": self.config.training.elbo_divergence_threshold,
             "parameters/geco_goal": self.config.training.geco_goal,
             "parameters/geco_lr": self.config.training.geco_lr,
             "parameters/geco_alpha": self.config.training.geco_alpha,
@@ -231,7 +235,7 @@ class TrainingModule(pl.LightningModule):
         self.log_dict(static_params, on_step=False, on_epoch=True)
         self._logged_static_params = True
     
-    def _compute_loss(self, batch: Dict[str, torch.Tensor], mode: str = "train", return_output: bool = False) -> Union[Tuple[torch.Tensor, Dict[str, torch.Tensor]], Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, Any]]]:
+    def _compute_loss(self, batch: Dict[str, torch.Tensor], mode: str = "train") -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, Any], bool]:
         """Compute loss and metrics."""
         
         image = batch["image"]
@@ -242,6 +246,7 @@ class TrainingModule(pl.LightningModule):
         # Extract loss components from GenesisV2 output
         mixture_loss = output["mixture_loss"]  # Reconstruction error
         latent_kl_loss = output["latent_kl_loss"]  # KL loss for latents
+        latent_kl_loss_per_slot = output["latent_kl_loss_per_slot"]  # Per-slot latent KL [B, K]
         mask_kl_loss = output["mask_kl_loss"]  # KL loss for masks
         
         # Total KL divergence (conditionally include mask KL)
@@ -256,29 +261,46 @@ class TrainingModule(pl.LightningModule):
         # Compute ELBO for monitoring (reconstruction + KL)
         elbo = mixture_loss.mean() + total_kl.mean()
         
+        # Check for ELBO divergence
+        elbo_diverged = elbo.item() > self.config.training.elbo_divergence_threshold
+        
+        # Compute normalized reconstruction error (resolution-independent)
+        num_elements = image.shape[1:].numel()  # channels * height * width
+        mixture_loss_per_element = mixture_loss.mean() / num_elements
+        
         # Prepare essential metrics only
         metrics = {
             # Core loss terms
-            f"loss/{mode}_total_loss": total_loss,
-            f"loss/{mode}_mixture_loss": mixture_loss.mean(),
-            f"loss/{mode}_latent_kl": latent_kl_loss.mean(),
-            f"loss/{mode}_mask_kl": mask_kl_loss.mean(),
-            f"loss/{mode}_total_kl": total_kl.mean(),
-            f"loss/{mode}_elbo": elbo,
+            f"loss_{mode}/total_loss": total_loss,
+            f"loss_{mode}/mixture_loss": mixture_loss.mean(),
+            f"loss_{mode}/err_per_elem": mixture_loss_per_element,
+            f"loss_{mode}/latent_kl": latent_kl_loss.mean(),
+            f"loss_{mode}/mask_kl": mask_kl_loss.mean(),
+            f"loss_{mode}/total_kl": total_kl.mean(),
+            f"loss_{mode}/elbo": elbo,
             # Essential GECO metrics
-            f"geco/{mode}_beta": self.geco.beta.item(),
-            f"geco/{mode}_err_ema": self.geco.err_ema.item() if self.geco._err_ema_initialized else 0.0,
-            f"geco/{mode}_constraint": (self.geco.goal - self.geco.err_ema).item() if self.geco._err_ema_initialized else 0.0,
+            f"geco_{mode}/beta": self.geco.beta.item(),
+            f"geco_{mode}/err_ema": self.geco.err_ema.item() if self.geco._err_ema_initialized else 0.0,
+            f"geco_{mode}/constraint": (self.geco.goal - self.geco.err_ema).item() if self.geco._err_ema_initialized else 0.0,
         }
         
-        if return_output:
-            return total_loss, metrics, output
-        else:
-            return total_loss, metrics
+        # Add per-slot latent KL losses
+        latent_kl_per_slot_mean = latent_kl_loss_per_slot.mean(0)  # [K] - mean over batch
+        for slot_idx in range(latent_kl_per_slot_mean.shape[0]):
+            metrics[f"slot_{mode}/kl_latent_{slot_idx}"] = latent_kl_per_slot_mean[slot_idx].item()
+        
+        return total_loss, metrics, output, elbo_diverged
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Training step."""
-        loss, metrics = self._compute_loss(batch, mode="train")
+        loss, metrics, output, elbo_diverged = self._compute_loss(batch, mode="train")
+        
+        # Check for ELBO divergence and stop training if detected
+        if elbo_diverged:
+            elbo_value = metrics["loss_train/elbo"]
+            self.print(f"ELBO DIVERGENCE DETECTED: {elbo_value:.2e} > {self.config.training.elbo_divergence_threshold:.2e}")
+            self.print("Stopping training to prevent further divergence.")
+            self.trainer.should_stop = True
         
         # Log loss and metrics (step-level only for training)
         self.log_dict(metrics, on_step=True, on_epoch=False, prog_bar=True, logger=True)
@@ -294,7 +316,7 @@ class TrainingModule(pl.LightningModule):
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Validation step."""
         # Get loss, metrics, and full output for visualization
-        loss, metrics, output = self._compute_loss(batch, mode="val", return_output=True)
+        loss, metrics, output, elbo_diverged = self._compute_loss(batch, mode="val")
         
         # Log metrics
         self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -311,9 +333,9 @@ class TrainingModule(pl.LightningModule):
     
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step."""
-        loss, metrics = self._compute_loss(batch, mode="test")
+        loss, metrics, output, elbo_diverged = self._compute_loss(batch, mode="test")
         
-        # Log metrics
+        # Log metrics (divergence detection not needed during testing)
         self.log_dict(metrics, on_step=False, on_epoch=True, logger=True)
         
         return loss

@@ -111,19 +111,21 @@ class GenesisV2(nn.Module):
         # Compute mixture loss
         mixture_loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
 
-        # Compute KL loss if autoregressive prior
-        latent_kl_loss, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=True) # [B]
+        # Compute KL loss if autoregressive prior (per-slot, then sum)
+        latent_kl_loss_per_slot, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=False) # [B, K]
+        latent_kl_loss = latent_kl_loss_per_slot.sum(dim=1) # [B] - sum over slots
 
         # Compute mask KL loss
         mask_kl_loss_val = categorical_kl_loss(
                 q_probs=masks, 
-                p_probs=log_alpha_k.squeeze(2).exp(),  # [B, K, H, W]
+                p_probs=log_alpha_k.squeeze(2).exp(),    # [B, K, H, W]
                 detach_p=self.config.detach_recon_masks
             ) # [B]
 
         return {
             'mixture_loss': mixture_loss,
             'latent_kl_loss': latent_kl_loss,
+            'latent_kl_loss_per_slot': latent_kl_loss_per_slot,
             'mask_kl_loss': mask_kl_loss_val,
             'reconstruction': recon,
             'masks': masks,
