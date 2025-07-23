@@ -73,12 +73,12 @@ class GenesisV2(nn.Module):
         x_enc = self.encoder(x) # [B, feat_dim, H, W]
 
         x_seg = self.seg_head(x_enc) # [B, feat_dim, H, W]
-        masks, scopes = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K_steps, H, W]
+        masks_k, scopes_k = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K_steps, H, W]
         
         # Vectorized object feature extraction and latent computation
-        z_k, q_z_k = self.compute_latents(x_enc, masks)
+        z_k, q_z_k = self.compute_latents(x_enc, masks_k)
 
-        return z_k, q_z_k, masks
+        return z_k, q_z_k, masks_k, scopes_k
     
 
     def decode(self, z_k):
@@ -104,7 +104,7 @@ class GenesisV2(nn.Module):
         """
         x: [B, C, H, W]  # C = 3 for RGB input channels
         """
-        z_k, q_z_k, masks = self.encode(x, max_steps=max_steps, dynamic=dynamic) # [B, K, F], [B, K, H, W], Normal([B, K, F])
+        z_k, q_z_k, masks_k, scopes_k = self.encode(x, max_steps=max_steps, dynamic=dynamic) # [B, K, F], [B, K, H, W], Normal([B, K, F])
         recon_k, log_alpha_k = self.decode(z_k) # [B, K, C/1, H, W]
 
         # Reconstruct image by marginalizing over K objects
@@ -116,24 +116,31 @@ class GenesisV2(nn.Module):
         # Compute KL loss if autoregressive prior (per-slot, then sum)
         latent_kl_loss_per_slot, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=False) # [B, K]
         latent_kl_loss = latent_kl_loss_per_slot.sum(dim=1) # [B] - sum over slots
+        
+        # Convert decoder's log-alpha to probability space for consistency
+        alpha_k = log_alpha_k.squeeze(2).exp() # [B, K, H, W]
 
         # Compute mask KL loss
         mask_kl_loss_val = categorical_kl_loss(
-                q_probs=masks, 
-                p_probs=log_alpha_k.squeeze(2).exp(),    # [B, K, H, W]
+                q_probs=masks_k, 
+                p_probs=alpha_k,    # [B, K, H, W]
                 detach_p=self.config.detach_recon_masks
             ) # [B]
 
         return {
+            # Losses
             'mixture_loss': mixture_loss,
             'latent_kl_loss': latent_kl_loss,
             'latent_kl_loss_per_slot': latent_kl_loss_per_slot,
             'mask_kl_loss': mask_kl_loss_val,
-            'reconstruction': recon,
-            'masks': masks,
-            'object_reconstructions': recon_k,
-            'log_alpha': log_alpha_k,
-            'latents': z_k
+
+            # Main Outputs for downstream use
+            'recon': recon,                         # [B, C, H, W]
+            'latents_k': z_k,                       # [B, K, F]
+            'recon_k': recon_k,                     # [B, K, C, H, W]
+            'masks_k': masks_k,                     # [B, K, H, W] (Attention Masks, PROBABILITY space)
+            'scopes_k': scopes_k,                   # [B, K, H, W] (Attention Scopes, PROBABILITY space)
+            'alpha_k': alpha_k,                     # [B, K, H, W] (Decoder Masks, PROBABILITY space)
         }
     
 
