@@ -11,32 +11,44 @@ from pytorch_lightning.loggers import WandbLogger
 
 # Import our modules
 from data.d_sprites import VariableDSpritesConfig
-from utils import cosine_schedule
-
+from models.genesis_v2 import GenesisV2Config, GenesisV2
+from modules.geco import create_geco_for_image_size
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for PCAE model parameters."""
-    
-    # Model architecture
-    num_affine_caps: int = 8
-    num_similarity_caps: int = 8
-    num_templates: Optional[int] = None
-    hidden_dim: int = 128
-    n_conv_layers: int = 4
-    n_transform_layers: int = 2
-    n_heads: int = 4
-    
-    # Template settings
-    template_size: int = 11
-    use_alpha_channel: bool = True
-    colored_templates: bool = False
-    allow_flip: bool = True
-    
-    # Input/output settings
-    input_channels: int = 3  # For RGB: 3, for grayscale: 1, for discrete: depends on encoding
-    num_colors: Optional[int] = None  # None for RGB/grayscale, palette size for discrete
+    model_type: str = 'genesis_v2'
+    K_steps: int = 5
+    in_chnls: int = 3
+    img_size: int = 64
+    feat_dim: int = 64
+    kernel: str = 'gaussian'
+    broadcast_size: int = 4
+    add_coords_every_layer: bool = False
+    normal_std: float = 0.7        # std for normal distribution for the mixture model
+    lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
+    detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
+
+    def __post_init__(self):
+        assert self.model_type == 'genesis_v2', "Only GenesisV2 is supported"
+        self.model_config = GenesisV2Config(
+            K_steps=self.K_steps,
+            in_chnls=self.in_chnls,
+            img_size=self.img_size,
+            feat_dim=self.feat_dim,
+            kernel=self.kernel,
+            broadcast_size=self.broadcast_size,
+            add_coords_every_layer=self.add_coords_every_layer,
+            normal_std=self.normal_std,
+            lstm_hidden_dim=self.lstm_hidden_dim,
+            detach_recon_masks=self.detach_recon_masks
+        )
+
+    def get_model(self):
+        if self.model_type == 'genesis_v2':
+            return GenesisV2(self.model_config)
+        else:
+            raise ValueError(f"Unsupported model type: {self.model_type}")
 
 
 @dataclass
@@ -47,25 +59,24 @@ class TrainingConfig:
     batch_size: int = 32
     max_steps: int = 10000
     learning_rate: float = 1e-3
-    weight_decay: float = 1e-4
-    
-    # Loss weights
-    nll_weight: float = 1.0
-    mse_weight: float = 0.0
-    neighborhood_agreement_weight: float = 0.01
-    centre_of_mass_weight: float = 0.01
-    compactness_weight: float = 0.01
-    
-    # Training dynamics
-    gumbel_tau_start: float = 1.0
-    gumbel_tau_end: float = 0.0
-    gumbel_tau_decay_steps: int = 5000
+    weight_decay: float = 0.0
     
     # Learning rate scheduling
     use_lr_scheduler: bool = True
     lr_schedule_patience: int = 5  # validation epochs to wait before reducing LR
     lr_schedule_factor: float = 0.5
     lr_schedule_min_lr: float = 1e-6
+    
+    # Regularization control
+    use_mask_kl_loss: bool = True  # Whether to include mask KL regularization
+    
+    # GECO (Generalized ELBO Constrained Optimization) parameters
+    geco_goal: float = 0.5655  # Target reconstruction error per pixel
+    geco_lr: float = 1e-5      # GECO learning rate for beta updates
+    geco_alpha: float = 0.99   # GECO momentum for error EMA
+    geco_beta_init: float = 1.0 # Initial beta value
+    geco_beta_min: float = 1e-10 # Minimum beta value
+    geco_speedup: float = 10.0  # Scale GECO lr if constraint violation is positive
 
 
 @dataclass
@@ -111,11 +122,8 @@ class ExperimentConfig:
     
     # Checkpointing
     save_top_k: int = 3
-    monitor_metric: str = "loss/val_nll_loss"  # For checkpointing
+    monitor_metric: str = "loss/val_total_loss"  # For checkpointing
     monitor_mode: str = "min"
-    
-    # Learning rate scheduler monitoring (separate from checkpointing)
-    lr_monitor_metric: str = "loss/val_nll_loss"  # Monitor validation loss
 
 
 class DataModule(pl.LightningDataModule):
@@ -167,119 +175,57 @@ class DataModule(pl.LightningDataModule):
         )
 
 
-class LightningModule(pl.LightningModule):
-    """PyTorch Lightning module wrapping PCAE."""
-    
+class TrainingModule(pl.LightningModule):    
     def __init__(self, config: ExperimentConfig):
         super().__init__()
         self.config = config
         self.save_hyperparameters(vars(config))
         
         # Initialize model
-        self.model = self._create_model()
+        self.model = self.config.model.get_model()
         
+        # Initialize GECO using the helper function for cleaner configuration
+        self.geco = create_geco_for_image_size(
+            img_size=self.config.model.img_size,
+            channels=self.config.model.in_chnls,
+            goal_per_pixel=self.config.training.geco_goal,
+            base_step_size=self.config.training.geco_lr,
+            alpha=self.config.training.geco_alpha,
+            beta_init=self.config.training.geco_beta_init,
+            beta_min=self.config.training.geco_beta_min,
+            speedup=self.config.training.geco_speedup
+        )
         # Flag to log static parameters only once
         self._logged_static_params = False
     
-    def _create_model(self) -> PCAE:
-        """Create PCAE model based on configuration."""
-        model_cfg = self.config.model
-        data_cfg = self.config.data
-        
-        # Determine input channels and num_colors based on data mode
-        if data_cfg.mode.upper() == "RGB":
-            assert model_cfg.input_channels == 3, "RGB data must have 3 input channels"
-            num_colors = None
-        elif data_cfg.mode.upper() == "DISCRETE":
-            # For discrete mode, we typically use embeddings or one-hot encoding
-            num_colors = data_cfg.n_colours
-        else:
-            raise ValueError(f"Unsupported data mode: {data_cfg.mode}")
-        
-        return PCAE(
-            num_affine_caps=model_cfg.num_affine_caps,
-            num_similarity_caps=model_cfg.num_similarity_caps,
-            input_channels=model_cfg.input_channels,
-            use_alpha_channel=model_cfg.use_alpha_channel,
-            hidden_dim=model_cfg.hidden_dim,
-            n_conv_layers=model_cfg.n_conv_layers,
-            n_transform_layers=model_cfg.n_transform_layers,
-            n_heads=model_cfg.n_heads,
-            input_size=data_cfg.max_hw,  # Use maximum image size from data config
-            template_size=model_cfg.template_size,
-            allow_flip=model_cfg.allow_flip,
-            colored_templates=model_cfg.colored_templates,
-            num_templates=model_cfg.num_templates,
-            num_colors=num_colors,
-        )
-    
-    def _get_gumbel_tau(self) -> float:
-        """Get current Gumbel temperature using cosine decay schedule."""
-        return cosine_schedule(
-            start_value=self.config.training.gumbel_tau_start,
-            end_value=self.config.training.gumbel_tau_end,
-            current_step=self.global_step,
-            total_steps=self.config.training.gumbel_tau_decay_steps
-        )
-    
-    def _visualize_templates(self) -> Optional[Dict[str, Any]]:
-        """
-        Visualize templates using utility functions.
-        
-        Returns:
-            Dictionary with W&B template visualizations or None if W&B unavailable
-        """
-        try:
-            # Get template visualizations as numpy arrays
-            templates_dict = visualize_templates(self.model.decoder, return_format="numpy")
-            
-            # Convert to W&B format
-            wandb_dict = templates_to_wandb_images(templates_dict)
-            
-            # Add "templates/" prefix to keys
-            return {f"templates/{key}": images for key, images in wandb_dict.items()}
-            
-        except ImportError:
-            warnings.warn("wandb not available, template visualization disabled")
-            return None
-        except Exception as e:
-            warnings.warn(f"Template visualization failed: {e}")
-            return None
-
-    # ------------------------------------------------------------------
-    # New: full model visualisation on a *single* validation sample
-    # ------------------------------------------------------------------
-    def _visualize_sample(self, output: Dict[str, Any], sample_idx: int = 0):
-        """Create a figure showing original, reconstruction and per-capsule details.
-
-        Returns a matplotlib Figure or None if visualisation fails.
-        """
-        try:
-            from src.utils import visualize_model_prediction  # imported lazily to avoid heavy deps at import time
-            fig = visualize_model_prediction(output, self.model.decoder, sample_idx=sample_idx)
-            return fig
-        except Exception as e:
-            warnings.warn(f"Sample visualisation failed: {e}")
-            return None
+    def on_fit_start(self):
+        """Called when fit begins."""
+        # Log static parameters once at the start of training
+        self._log_static_parameters()
     
     def _log_static_parameters(self):
         """Log static configuration parameters once."""
         if self._logged_static_params:
             return
         
-        # Log loss weights
+        # Log training configuration
         static_params = {
-            "parameters/nll_weight": self.config.training.nll_weight,
-            "parameters/mse_weight": self.config.training.mse_weight,
-            "parameters/neighborhood_agreement_weight": self.config.training.neighborhood_agreement_weight,
-            "parameters/centre_of_mass_weight": self.config.training.centre_of_mass_weight,
-            "parameters/compactness_weight": self.config.training.compactness_weight,
             "parameters/learning_rate": self.config.training.learning_rate,
             "parameters/weight_decay": self.config.training.weight_decay,
             "parameters/batch_size": self.config.training.batch_size,
-            "parameters/gumbel_tau_start": self.config.training.gumbel_tau_start,
-            "parameters/gumbel_tau_end": self.config.training.gumbel_tau_end,
-            "parameters/gumbel_tau_decay_steps": self.config.training.gumbel_tau_decay_steps,
+            "parameters/max_steps": self.config.training.max_steps,
+            "parameters/use_mask_kl_loss": self.config.training.use_mask_kl_loss,
+            "parameters/geco_goal": self.config.training.geco_goal,
+            "parameters/geco_lr": self.config.training.geco_lr,
+            "parameters/geco_alpha": self.config.training.geco_alpha,
+            "parameters/geco_beta_init": self.config.training.geco_beta_init,
+            "parameters/geco_beta_min": self.config.training.geco_beta_min,
+            "parameters/geco_speedup": self.config.training.geco_speedup,
+            "model/K_steps": self.config.model.K_steps,
+            "model/img_size": self.config.model.img_size,
+            "model/feat_dim": self.config.model.feat_dim,
+            "model/normal_std": self.config.model.normal_std,
+            "model/lstm_hidden_dim": self.config.model.lstm_hidden_dim,
         }
         
         self.log_dict(static_params, on_step=False, on_epoch=True)
@@ -289,41 +235,40 @@ class LightningModule(pl.LightningModule):
         """Compute loss and metrics."""
         
         image = batch["image"]
-        # Create mask - synthetic data doesn't always provide masks
-        if "mask" in batch:
-            mask = batch["mask"]
+        
+        # Forward pass through GenesisV2
+        output = self.model(image)
+        
+        # Extract loss components from GenesisV2 output
+        mixture_loss = output["mixture_loss"]  # Reconstruction error
+        latent_kl_loss = output["latent_kl_loss"]  # KL loss for latents
+        mask_kl_loss = output["mask_kl_loss"]  # KL loss for masks
+        
+        # Total KL divergence (conditionally include mask KL)
+        if self.config.training.use_mask_kl_loss:
+            total_kl = latent_kl_loss + mask_kl_loss
         else:
-            B, *spatial_dims = image.shape[:1] + image.shape[-2:]  # Handle both RGB and discrete
-            mask = torch.ones(B, *spatial_dims[-2:], device=image.device, dtype=torch.bool)
+            total_kl = latent_kl_loss
         
-        # Forward pass
-        output = self.model(image, mask=mask, tau=self._get_gumbel_tau())
+        # Compute total loss using GECO
+        total_loss = self.geco.loss(mixture_loss.mean(), total_kl.mean())
         
-        # Extract individual loss components
-        nll_loss = output["nll_loss"]
-        mse_loss = output["mse_loss"]
-        neighborhood_agreement = output["neighborhood_agreement"]
-        centre_of_mass = output["centre_of_mass"]
-        compactness = output["compactness"]
+        # Compute ELBO for monitoring (reconstruction + KL)
+        elbo = mixture_loss.mean() + total_kl.mean()
         
-        # Compute weighted total loss
-        training_cfg = self.config.training
-        total_loss = (
-            training_cfg.nll_weight * nll_loss +
-            training_cfg.mse_weight * mse_loss +
-            training_cfg.neighborhood_agreement_weight * neighborhood_agreement +
-            training_cfg.centre_of_mass_weight * centre_of_mass +
-            training_cfg.compactness_weight * compactness
-        )
-        
-        # Prepare metrics dict with organized sections
+        # Prepare essential metrics only
         metrics = {
+            # Core loss terms
             f"loss/{mode}_total_loss": total_loss,
-            f"loss/{mode}_nll_loss": nll_loss,
-            f"loss/{mode}_mse_loss": mse_loss,
-            f"regularization/{mode}_neighborhood_agreement": neighborhood_agreement,
-            f"regularization/{mode}_centre_of_mass": centre_of_mass,
-            f"regularization/{mode}_compactness": compactness,
+            f"loss/{mode}_mixture_loss": mixture_loss.mean(),
+            f"loss/{mode}_latent_kl": latent_kl_loss.mean(),
+            f"loss/{mode}_mask_kl": mask_kl_loss.mean(),
+            f"loss/{mode}_total_kl": total_kl.mean(),
+            f"loss/{mode}_elbo": elbo,
+            # Essential GECO metrics
+            f"geco/{mode}_beta": self.geco.beta.item(),
+            f"geco/{mode}_err_ema": self.geco.err_ema.item() if self.geco._err_ema_initialized else 0.0,
+            f"geco/{mode}_constraint": (self.geco.goal - self.geco.err_ema).item() if self.geco._err_ema_initialized else 0.0,
         }
         
         if return_output:
@@ -333,17 +278,13 @@ class LightningModule(pl.LightningModule):
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Training step."""
-        # Log static parameters once
-        self._log_static_parameters()
-        
         loss, metrics = self._compute_loss(batch, mode="train")
         
-        # Log loss and regularization metrics (step-level only for training)
+        # Log loss and metrics (step-level only for training)
         self.log_dict(metrics, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         
         # Log scheduled parameters that change during training
         scheduled_params = {
-            "scheduled_params/gumbel_tau": self._get_gumbel_tau(),
             "scheduled_params/learning_rate": self.optimizers().param_groups[0]['lr'],
         }
         self.log_dict(scheduled_params, on_step=True, on_epoch=False, prog_bar=False, logger=True)
@@ -358,29 +299,14 @@ class LightningModule(pl.LightningModule):
         # Log metrics
         self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         
-        # Log template visualizations (only for the first validation batch to avoid too many images)
-        if batch_idx == 0 and isinstance(self.logger, WandbLogger):
-            template_viz = self._visualize_templates()
-            if template_viz:
-                # Log template visualizations
-                for key, images in template_viz.items():
-                    self.logger.experiment.log({key: images}, step=self.global_step)
-
-            # Log *sample* visualisations (first few images in the batch)
-            import matplotlib.pyplot as plt, warnings as _w
-            max_samples_to_log = 3
-            try:
-                import wandb
-            except ImportError:
-                _w.warn("wandb not available – skipping sample visualisations")
-                return loss
-
-            for i in range(min(max_samples_to_log, output['images'].shape[0])):
-                fig = self._visualize_sample(output, sample_idx=i)
-                if fig is not None:
-                    self.logger.experiment.log({f"samples/val_sample_{i}": wandb.Image(fig)}, step=self.global_step)
-                    plt.close(fig)
-  
+        # TODO: Add visualization code for GenesisV2 outputs
+        # This could include:
+        # - Input images
+        # - Reconstructions 
+        # - Object masks
+        # - Object reconstructions
+        # - Instance segmentations
+        
         return loss
     
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -415,7 +341,7 @@ class LightningModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": self.config.lr_monitor_metric,  # Monitor validation loss
+                "monitor": self.config.monitor_metric,  # Monitor validation loss
                 "frequency": 1,  # Check scheduler every validation epoch
                 "interval": "epoch"
                 # Note: With epoch-level monitoring, patience controls validation epochs
@@ -434,7 +360,7 @@ def create_trainer(config: ExperimentConfig, logger=None, accelerator: str = Non
     # Model checkpointing
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(config.save_dir, config.project_name, config.run_name, "checkpoints"),
-        filename="epoch_{epoch:02d}-step_{step}-{val_loss/val_nll_loss:.4f}",
+        filename="epoch_{epoch:02d}-step_{step}-{" + config.monitor_metric + ":.4f}",
         monitor=config.monitor_metric,
         mode=config.monitor_mode,
         save_top_k=config.save_top_k,
@@ -443,10 +369,9 @@ def create_trainer(config: ExperimentConfig, logger=None, accelerator: str = Non
     )
     callbacks.append(checkpoint_callback)
     
-    # Learning rate monitoring
-    if config.training.use_lr_scheduler:
-        lr_monitor = LearningRateMonitor(logging_interval="step")
-        callbacks.append(lr_monitor)
+    # Learning rate monitoring - always useful for debugging
+    lr_monitor = LearningRateMonitor(logging_interval="step")
+    callbacks.append(lr_monitor)
     
     # Progress bar - show step-based progress when using max_steps
     progress_bar = RichProgressBar()
@@ -478,35 +403,3 @@ def create_trainer(config: ExperimentConfig, logger=None, accelerator: str = Non
     )
     
     return trainer
-
-
-def create_discrete_experiment():
-    """Example function to create a discrete data experiment."""
-    config = ExperimentConfig()
-    
-    # Configure for discrete data
-    config.run_name = "pcae_discrete_experiment"
-    config.data.mode = "DISCRETE"
-    config.data.n_colours = 10
-    config.model.input_channels = 8         # Will be set automatically but shown for clarity
-    config.model.num_colors = 10
-    config.model.colored_templates = False  # Use monochrome templates for discrete data
-    
-    return config
-
-
-def create_rgb_experiment():
-    """Example function to create an RGB data experiment."""
-    config = ExperimentConfig()
-    
-    # Configure for RGB data
-    config.run_name = "pcae_rgb_experiment"
-    config.data.mode = "RGB"
-    config.model.input_channels = 3
-    config.model.num_colors = None
-    config.model.colored_templates = False
-    
-    return config
-
-
-

@@ -18,8 +18,7 @@ class GenesisV2Config:
     add_coords_every_layer: bool = False
     normal_std: float = 0.7     # std for normal distribution for the mixture model
     lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
-    klm_loss: bool = False      # whether to use mask KL loss
-    detach_mr_in_klm: bool = True  # whether to detach reconstructed masks in KL loss
+    detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
@@ -115,16 +114,13 @@ class GenesisV2(nn.Module):
         # Compute KL loss if autoregressive prior
         latent_kl_loss, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=True) # [B]
 
-        # Compute mask KL loss if enabled
-        mask_kl_loss_val = None
-        if self.config.klm_loss:
-            mask_kl_loss_val = categorical_kl_loss(
+        # Compute mask KL loss
+        mask_kl_loss_val = categorical_kl_loss(
                 q_probs=masks, 
                 p_probs=log_alpha_k.squeeze(2).exp(),  # [B, K, H, W]
-                detach_p=self.config.detach_mr_in_klm
+                detach_p=self.config.detach_recon_masks
             ) # [B]
 
-        import ipdb; ipdb.set_trace()
         return {
             'mixture_loss': mixture_loss,
             'latent_kl_loss': latent_kl_loss,
