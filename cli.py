@@ -19,9 +19,167 @@ from pytorch_lightning.loggers import WandbLogger
 # Import our modules
 from src.train import (
     ExperimentConfig, DataModule, TrainingModule, 
+    ModelConfig, TrainingConfig, DataConfig,
     create_trainer
 )
 from src.config_utils import save_config_to_yaml, load_config_from_yaml
+
+
+def load_config_from_checkpoint(checkpoint_path: str) -> ExperimentConfig:
+    """
+    Load configuration from a checkpoint file.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        
+    Returns:
+        ExperimentConfig loaded from checkpoint
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    
+    if 'hyper_parameters' not in checkpoint:
+        raise ValueError(f"Checkpoint does not contain 'hyper_parameters' key. Cannot load config from checkpoint.")
+    
+    hyper_params = checkpoint['hyper_parameters']
+    
+    # Convert hyperparameters back to ExperimentConfig
+    # PyTorch Lightning saves the vars(config) as hyper_parameters
+    config = ExperimentConfig()
+    
+    # Handle nested dataclass objects - PyTorch Lightning may save these as actual objects or dicts
+    if 'model' in hyper_params:
+        model_params = hyper_params['model']
+        if hasattr(model_params, '__dict__'):  # It's an object
+            config.model = model_params
+        elif isinstance(model_params, dict):  # It's a dictionary
+            config.model = ModelConfig(**model_params)
+        
+    if 'training' in hyper_params:
+        training_params = hyper_params['training']
+        if hasattr(training_params, '__dict__'):  # It's an object
+            config.training = training_params
+        elif isinstance(training_params, dict):  # It's a dictionary
+            config.training = TrainingConfig(**training_params)
+            
+    if 'data' in hyper_params:
+        data_params = hyper_params['data']
+        if hasattr(data_params, '__dict__'):  # It's an object
+            config.data = data_params
+        elif isinstance(data_params, dict):  # It's a dictionary
+            config.data = DataConfig(**data_params)
+    
+    # Update top-level config attributes
+    for key, value in hyper_params.items():
+        if hasattr(config, key) and key not in ['model', 'training', 'data']:
+            setattr(config, key, value)
+    
+    return config
+
+
+def load_weights_from_checkpoint(model: TrainingModule, checkpoint_path: str):
+    """
+    Load only model weights and GECO state from checkpoint, ignoring optimizer/scheduler state.
+    
+    This handles torch.compile compatibility by automatically detecting and handling
+    state dict key differences between compiled and non-compiled models.
+    
+    Args:
+        model: Fresh TrainingModule instance
+        checkpoint_path: Path to checkpoint file
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    
+    if 'state_dict' not in checkpoint:
+        raise ValueError(f"Checkpoint does not contain 'state_dict' key. Invalid checkpoint format.")
+    
+    full_state_dict = checkpoint['state_dict']
+    
+    # Filter state dict to include only:
+    # 1. Model weights (model.*)
+    # 2. GECO state (geco.*)
+    # Exclude: optimizer states, lr scheduler states, etc.
+    
+    model_state_dict = {}
+    for key, value in full_state_dict.items():
+        if key.startswith('model.') or key.startswith('geco.'):
+            model_state_dict[key] = value
+    
+    # Handle torch.compile compatibility
+    model_state_dict = _handle_compile_compatibility(model, model_state_dict)
+    
+    # Load the filtered state dict
+    missing_keys, unexpected_keys = model.load_state_dict(model_state_dict, strict=False)
+    
+    # Report what was loaded/ignored
+    typer.echo(f"   Loaded {len(model_state_dict)} parameters")
+    if missing_keys and len(missing_keys) > 0:
+        typer.echo(f"   Missing keys (will use random init): {len(missing_keys)} parameters")
+        if len(missing_keys) <= 5:
+            typer.echo(f"     Examples: {missing_keys[:5]}")
+    if unexpected_keys and len(unexpected_keys) > 0:
+        typer.echo(f"   Unexpected keys (ignored): {len(unexpected_keys)} parameters")
+        if len(unexpected_keys) <= 5:
+            typer.echo(f"     Examples: {unexpected_keys[:5]}")
+
+
+def _handle_compile_compatibility(model: TrainingModule, checkpoint_state_dict: dict) -> dict:
+    """
+    Handle state dict compatibility between compiled and non-compiled models.
+    
+    torch.compile can add prefixes like '_orig_mod.' to parameter names.
+    This function attempts to match parameters correctly regardless of compilation state.
+    
+    Args:
+        model: Target model to load weights into
+        checkpoint_state_dict: State dict from checkpoint
+        
+    Returns:
+        Compatible state dict with corrected keys
+    """
+    # Get current model state dict to see what keys we expect
+    current_state_dict = model.state_dict()
+    current_keys = set(current_state_dict.keys())
+    checkpoint_keys = set(checkpoint_state_dict.keys())
+    
+    # Check if we have exact matches (no compilation mismatch)
+    exact_matches = current_keys.intersection(checkpoint_keys)
+    if len(exact_matches) > len(current_keys) * 0.8:  # Most keys match
+        return checkpoint_state_dict
+    
+    # Attempt to handle compilation prefix differences
+    corrected_state_dict = {}
+    
+    for checkpoint_key, value in checkpoint_state_dict.items():
+        # Try various key transformations
+        possible_keys = [
+            checkpoint_key,  # Original key
+            checkpoint_key.replace('._orig_mod.', '.'),  # Remove _orig_mod prefix
+            checkpoint_key.replace('.model._orig_mod.', '.model.'),  # Remove nested _orig_mod
+        ]
+        
+        # Also try adding _orig_mod if checkpoint doesn't have it but current model does
+        if '._orig_mod.' not in checkpoint_key:
+            base_parts = checkpoint_key.split('.')
+            if len(base_parts) >= 2:
+                # Insert _orig_mod after 'model'
+                if base_parts[0] == 'model':
+                    new_key = 'model._orig_mod.' + '.'.join(base_parts[1:])
+                    possible_keys.append(new_key)
+        
+        # Find the best matching key
+        best_key = None
+        for candidate_key in possible_keys:
+            if candidate_key in current_keys:
+                best_key = candidate_key
+                break
+        
+        if best_key:
+            corrected_state_dict[best_key] = value
+        else:
+            # Keep original key and let PyTorch Lightning handle it
+            corrected_state_dict[checkpoint_key] = value
+    
+    return corrected_state_dict
 
 
 app = typer.Typer(
@@ -68,10 +226,20 @@ def generate_config(
 
 @app.command()
 def train(
-    config_path: str = typer.Option(
-        ...,
+    config_path: Optional[str] = typer.Option(
+        None,
         "--config", "-c",
-        help="Path to the YAML configuration file"
+        help="Path to the YAML configuration file (required unless using --resume)"
+    ),
+    checkpoint_path: Optional[str] = typer.Option(
+        None,
+        "--checkpoint", "-k",
+        help="Path to checkpoint file to load from"
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume", "-r",
+        help="Resume full training state from checkpoint (loads config from checkpoint)"
     ),
     cpu: bool = typer.Option(
         False,
@@ -81,7 +249,7 @@ def train(
     compile_model: bool = typer.Option(
         False,
         "--compile",
-        help="Compile model with torch.compile for maximum performance"
+        help="Compile model with torch.compile for maximum performance (auto-handled in checkpoint loading)"
     ),
     debug: bool = typer.Option(
         False,
@@ -112,21 +280,51 @@ def train(
     """
     Train Genesis V2 model with the specified configuration.
     
-    Loads configuration from a YAML file and starts training. 
+    Supports three training modes:
+    
+    1. From scratch: --config my_config.yaml
+    2. Transfer learning: --config my_config.yaml --checkpoint path/to/weights.ckpt
+    3. Resume training: --checkpoint path/to/checkpoint.ckpt --resume
+    
+    When using --resume, the configuration is loaded from the checkpoint file.
     Command-line options can override specific config values.
     """
-    config_file = Path(config_path)
     
-    # Check if config file exists
-    if not config_file.exists():
-        typer.echo(f"❌ Config file not found: {config_file}", err=True)
-        typer.echo(f"   Generate one with: genesis-cli generate-config --output {config_file}")
+    # Check if config file exists (when required)
+    if config_path is not None:
+        config_file = Path(config_path)
+        if not config_file.exists():
+            typer.echo(f"❌ Config file not found: {config_file}", err=True)
+            typer.echo(f"   Generate one with: genesis-cli generate-config --output {config_file}")
+            raise typer.Exit(1)
+    
+    # Validate input parameters
+    if resume and checkpoint_path is None:
+        typer.echo(f"❌ --resume requires --checkpoint to be specified", err=True)
         raise typer.Exit(1)
+    
+    if not resume and config_path is None:
+        typer.echo(f"❌ --config is required when not using --resume", err=True)
+        typer.echo(f"   Use --resume to load config from checkpoint, or provide --config for fresh/transfer training")
+        raise typer.Exit(1)
+    
+    # Check if checkpoint file exists (if provided)
+    if checkpoint_path is not None:
+        checkpoint_file = Path(checkpoint_path)
+        if not checkpoint_file.exists():
+            typer.echo(f"❌ Checkpoint file not found: {checkpoint_file}", err=True)
+            raise typer.Exit(1)
     
     # Load configuration
     try:
-        config = load_config_from_yaml(ExperimentConfig, config_file)
-        typer.echo(f"✅ Loaded config from: {config_file}")
+        if resume:
+            # Load config from checkpoint
+            config = load_config_from_checkpoint(checkpoint_path)
+            typer.echo(f"✅ Loaded config from checkpoint: {checkpoint_path}")
+        else:
+            # Load config from YAML file
+            config = load_config_from_yaml(ExperimentConfig, config_file)
+            typer.echo(f"✅ Loaded config from: {config_file}")
     except Exception as e:
         typer.echo(f"❌ Error loading config: {e}", err=True)
         raise typer.Exit(1)
@@ -175,6 +373,11 @@ def train(
     typer.echo(f"   Training: {config.training.max_steps} steps, batch size {config.training.batch_size}")
     typer.echo(f"   Device: {accelerator.upper()} (precision: {precision})")
     typer.echo(f"   W&B logging: {'Disabled' if disable_wandb else 'Enabled'}")
+    if resume:
+        typer.echo(f"   Mode: Resume full training state from checkpoint")
+    elif checkpoint_path is not None:
+        typer.echo(f"   Mode: Transfer learning (weights only from checkpoint)")
+        typer.echo(f"   Load weights from: {checkpoint_path}")
     
     if dry_run:
         typer.echo("\n🏃‍♂️ Dry run mode - exiting without training")
@@ -212,6 +415,16 @@ def train(
     # Create model
     model = TrainingModule(config)
     
+    # Handle transfer learning mode (load only model + GECO state, not full training state)
+    if checkpoint_path is not None and not resume:
+        typer.echo(f"🔧 Loading model weights and GECO state from checkpoint...")
+        try:
+            load_weights_from_checkpoint(model, checkpoint_path)
+            typer.echo(f"✅ Successfully loaded weights from: {checkpoint_path}")
+        except Exception as e:
+            typer.echo(f"❌ Error loading weights: {e}", err=True)
+            raise typer.Exit(1)
+    
     # Compile model for maximum performance if requested
     if compile_model:
         typer.echo(f"🔧 Compiling model for maximum performance...")
@@ -239,9 +452,17 @@ def train(
     trainer = create_trainer(config, logger=logger, accelerator=accelerator, devices=devices, precision=precision)
     
     # Start training
-    typer.echo(f"\n🚀 Starting training...")
+    if resume:
+        typer.echo(f"\n🚀 Resuming training from checkpoint...")
+        ckpt_path = checkpoint_path
+    elif checkpoint_path is not None:
+        typer.echo(f"\n🚀 Starting fresh training with loaded weights...")
+        ckpt_path = None  # Don't pass checkpoint to trainer.fit() in transfer learning mode
+    else:
+        typer.echo(f"\n🚀 Starting training from scratch...")
+        ckpt_path = None
     try:
-        trainer.fit(model, datamodule=datamodule)
+        trainer.fit(model, datamodule=datamodule, ckpt_path=ckpt_path)
         typer.echo(f"✅ Training completed!")
         typer.echo(f"   Checkpoints saved to: {trainer.checkpoint_callback.dirpath}")
     except KeyboardInterrupt:
@@ -360,6 +581,12 @@ def info():
     typer.echo("  1. python cli.py generate-config --output my_config.yaml")
     typer.echo("  2. # Edit my_config.yaml as needed")
     typer.echo("  3. python cli.py train --config my_config.yaml --debug")
+    typer.echo("")
+    typer.echo("Transfer learning (pretrained weights):")
+    typer.echo("  python cli.py train --config my_config.yaml --checkpoint path/to/weights.ckpt")
+    typer.echo("")
+    typer.echo("Resume training (full state, config from checkpoint):")
+    typer.echo("  python cli.py train --checkpoint path/to/checkpoint.ckpt --resume")
     typer.echo("")
     typer.echo("For detailed help on any command:")
     typer.echo("  python cli.py COMMAND --help")
