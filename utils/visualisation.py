@@ -21,7 +21,7 @@ def _to_numpy(img: torch.Tensor) -> "np.ndarray":  # type: ignore
     """Convert (C,H,W) tensor in [0,1] or [0,255] to (H,W,C) float32 [0,1]."""
     if img.max() > 1.01:
         img = img / 255.0
-    return img.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
+    return img.detach().cpu().float().permute(1, 2, 0).clamp(0, 1).numpy()
 
 
 # -----------------------------------------------------------------------------
