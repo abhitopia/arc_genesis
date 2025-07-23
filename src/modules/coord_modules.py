@@ -51,13 +51,13 @@ class SemiConv(nn.Module):
         # and the output relies solely on the pixel coordinates but that should change during training
         out = self.gate * self.conv(x)
 
-        # Get coordinate tensor and add to the last 2 channels of out
-        empty_tensor = torch.empty(batch_size, 0, H, W, device=x.device, dtype=x.dtype)
-        static_coords = self.pixel_coords(empty_tensor)  # [B, 2, H, W]
+        # Create zero tensor with out_channels - 2 so pixel_coords gives us out_channels total
+        zero_tensor = torch.zeros(batch_size, self.out_channels - 2, H, W, device=x.device, dtype=x.dtype)
+        static_coords_full = self.pixel_coords(zero_tensor)  # [B, out_channels, H, W]
 
         # delta is the last 2 channels of the output which additively modify the static pixel coordinates
         delta = out[:, -2:, :, :] # [B, 2, H, W]
 
-        # Set the last 2 channels of out to the static coordinates plus the delta
-        out[:, -2:, :, :] = delta + static_coords
+        # Add static coords directly to out (non-inplace)
+        out = out + static_coords_full
         return out, delta

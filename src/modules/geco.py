@@ -145,8 +145,8 @@ class GECO(nn.Module):
         if kl_divergence.numel() != 1:
             raise ValueError(f"kl_divergence must be scalar, got shape {kl_divergence.shape}")
         
-        # Compute current loss with current β
-        current_loss = reconstruction_error + self.beta * kl_divergence
+        # Compute current loss with current β (detach beta to avoid gradient issues)
+        current_loss = reconstruction_error + self.beta.detach() * kl_divergence
         
         # Update β (no gradients needed for this update)
         with torch.no_grad():
@@ -163,10 +163,10 @@ class GECO(nn.Module):
         """
         # Update reconstruction error EMA
         if not self._err_ema_initialized:
-            self.err_ema.copy_(reconstruction_error)
+            self.err_ema.data = reconstruction_error.data.clone()
             self._err_ema_initialized = True
         else:
-            self.err_ema.mul_(self.alpha).add_(reconstruction_error, alpha=(1.0 - self.alpha))
+            self.err_ema.data = self.err_ema * self.alpha + reconstruction_error * (1.0 - self.alpha)
         
         # Compute constraint violation: positive means error < goal (good)
         constraint = self.goal - self.err_ema
@@ -179,7 +179,7 @@ class GECO(nn.Module):
         
         # Update β: β(t+1) = β(t) * exp(λ * constraint)
         update_factor = torch.exp(current_step_size * constraint)
-        self.beta.mul_(update_factor).clamp_(self.beta_min, self.beta_max)
+        self.beta.data = torch.clamp(self.beta * update_factor, self.beta_min, self.beta_max)
         
         # Update statistics
         self._num_updates += 1
@@ -212,10 +212,10 @@ class GECO(nn.Module):
     
     def reset(self) -> None:
         """Reset GECO state (useful for new training runs)."""
-        self.err_ema.zero_()
+        self.err_ema.data.zero_()
         self._err_ema_initialized = False
-        self._num_updates.zero_()
-        self._constraint_history.zero_()
+        self._num_updates.data.zero_()
+        self._constraint_history.data.zero_()
         self._history_idx = 0
         # Keep current β value (don't reset to init)
     
@@ -228,7 +228,7 @@ class GECO(nn.Module):
         """
         if beta <= 0:
             raise ValueError(f"beta must be positive, got {beta}")
-        self.beta.fill_(beta)
+        self.beta.data.fill_(beta)
 
 
 def create_geco_for_image_size(

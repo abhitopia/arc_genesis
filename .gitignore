@@ -116,3 +116,7 @@ checkpoints/
 
 # Local binaries
 bin/
+
+
+lightning_logs/
+experiments/

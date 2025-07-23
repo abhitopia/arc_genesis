@@ -7,12 +7,11 @@ from typing import Optional, Dict, Any, Tuple, Union
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
-from pytorch_lightning.loggers import WandbLogger
 
 # Import our modules
-from data.d_sprites import VariableDSpritesConfig
-from models.genesis_v2 import GenesisV2Config, GenesisV2
-from modules.geco import create_geco_for_image_size
+from .data.d_sprites import VariableDSpritesConfig
+from .models.genesis_v2 import GenesisV2Config, GenesisV2
+from .modules.geco import create_geco_for_image_size
 
 
 @dataclass
@@ -86,7 +85,7 @@ class TrainingConfig:
 class DataConfig:
     dataset: 'str' = 'd_sprites'
     variable_size: bool = False
-    is_discrete: bool = True
+    is_discrete: bool = False  # Use RGB images instead of discrete/categorical
     seed: int = 42
 
     def __post_init__(self):
@@ -155,8 +154,6 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.num_workers > 0 else False,
         )
     
     def val_dataloader(self):
@@ -164,8 +161,6 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.num_workers > 0 else False,
         )
     
     def test_dataloader(self):
@@ -173,8 +168,6 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.num_workers > 0 else False,
         )
 
 
@@ -201,8 +194,8 @@ class TrainingModule(pl.LightningModule):
         # Flag to log static parameters only once
         self._logged_static_params = False
     
-    def on_fit_start(self):
-        """Called when fit begins."""
+    def on_train_start(self):
+        """Called when training begins."""
         # Log static parameters once at the start of training
         self._log_static_parameters()
     
@@ -343,7 +336,7 @@ class TrainingModule(pl.LightningModule):
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers."""
         optimizer = torch.optim.AdamW(
-            self.parameters(),
+            self.model.parameters(),
             lr=self.config.training.learning_rate,
             weight_decay=self.config.training.weight_decay
         )
