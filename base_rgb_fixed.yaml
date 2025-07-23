@@ -1,0 +1,44 @@
+model:
+  model_type: genesis_v2
+  K_steps: 5
+  in_chnls: 3
+  img_size: 64
+  feat_dim: 64
+  kernel: gaussian
+  broadcast_size: 4
+  add_coords_every_layer: false
+  normal_std: 0.7
+  lstm_hidden_dim: 256
+  detach_recon_masks: true
+training:
+  batch_size: 32
+  max_steps: 500000  # Run for just over one validation cycle
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  use_lr_scheduler: true
+  lr_schedule_patience: 5
+  lr_schedule_factor: 0.5
+  lr_schedule_min_lr: 1.0e-06
+  use_mask_kl_loss: false
+  elbo_divergence_threshold: 1.0e8
+  geco_goal: 0.5655
+  geco_lr: 1.0e-05
+  geco_alpha: 0.99
+  geco_beta_init: 1.0
+  geco_beta_min: 1.0e-10
+  geco_speedup: 10.0
+data:
+  dataset: d_sprites
+  variable_size: false
+  is_discrete: false
+  seed: 0
+# Experiment Metadata
+project_name: "genesis_v2"
+run_name: "base_rgb_fixed"
+save_dir: ./experiments
+# Logging & Checkpointing
+log_every_n_steps: 10
+val_check_interval: 1000 # Validate every 10 steps
+save_top_k: 3
+monitor_metric: "loss_val/total_loss"
+monitor_mode: min
