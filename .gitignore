@@ -110,7 +110,6 @@ venv.bak/
 *.swp
 
 # Data directories
-data/
 tmp/
 checkpoints/
 
@@ -120,3 +119,8 @@ bin/
 
 lightning_logs/
 experiments/
+# tf_records
+/data/
+
+# Registered Data
+/data/clevr_with_masks/
