@@ -492,12 +492,17 @@ class VariableDSpritesDataset(Dataset):
             padding_value=padding_value
         )
         
+        # Enable persistent workers and pin memory for faster data loading
+        use_fast_loading = num_workers > 0
+        
         return DataLoader(
             self,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            pin_memory=use_fast_loading,
+            persistent_workers=use_fast_loading
         )
 
 

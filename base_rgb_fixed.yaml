@@ -20,7 +20,7 @@ training:
   lr_schedule_factor: 0.5
   lr_schedule_min_lr: 1.0e-06
   use_mask_kl_loss: false
-  elbo_divergence_threshold: 1.0e8
+  elbo_divergence_threshold: 100000000.0
   geco_goal: 0.5655
   geco_lr: 1.0e-05
   geco_alpha: 0.99

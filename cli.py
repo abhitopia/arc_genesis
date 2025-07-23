@@ -102,6 +102,11 @@ def train(
         None,
         "--max-steps",
         help="Override max_steps for quick debugging"
+    ),
+    num_workers: int = typer.Option(
+        4,
+        "--num-workers", "-NW",
+        help="Override number of data loading workers"
     )
 ):
     """
@@ -189,7 +194,11 @@ def train(
     pl.seed_everything(config.data.seed, workers=True)
     
     # Create data module
-    datamodule = DataModule(config.data, config.training.batch_size)
+    datamodule = DataModule(
+        config.data, 
+        config.training.batch_size,
+        num_workers=num_workers
+    )
     
     # Create model
     model = TrainingModule(config)
