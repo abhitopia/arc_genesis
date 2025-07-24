@@ -7,7 +7,7 @@ model:
   kernel: gaussian
   broadcast_size: 16  # Even higher for sharper objects
   add_coords_every_layer: true
-  normal_std: 0.4  # Even tighter reconstruction
+  normal_std: 0.7  # Even tighter reconstruction
   lstm_hidden_dim: 256
   detach_recon_masks: true
 training:
@@ -34,7 +34,7 @@ data:
   seed: 0
 # Experiment Metadata
 project_name: "genesis_v2"
-run_name: "conservative_geco_goal"
+run_name: "conservative_geco_goal_same_std"
 save_dir: ./experiments
 # Logging & Checkpointing
 log_every_n_steps: 10
