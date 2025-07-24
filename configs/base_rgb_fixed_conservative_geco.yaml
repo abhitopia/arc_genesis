@@ -19,7 +19,7 @@ training:
   lr_schedule_patience: 5
   lr_schedule_factor: 0.5
   lr_schedule_min_lr: 1.0e-06
-  use_mask_kl_loss: true
+  use_mask_kl_loss: false # No mask kl loss
   elbo_divergence_threshold: 100000000.0
   geco_goal: 0.15  # VERY strict goal for ultra-high quality
   geco_lr: 2.0e-06  # Very slow GECO updates
