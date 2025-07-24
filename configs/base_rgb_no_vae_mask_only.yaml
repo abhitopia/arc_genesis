@@ -5,12 +5,12 @@ model:
   img_size: 64
   feat_dim: 64
   kernel: gaussian
-  broadcast_size: 16  # Even higher for sharper objects
+  broadcast_size: 16
   add_coords_every_layer: true
-  normal_std: 0.7  # Even tighter reconstruction
-  lstm_hidden_dim: 256
+  normal_std: 0.7
+  lstm_hidden_dim: 256  # Not used when use_vae=false
   detach_recon_masks: true
-  use_vae: true  # Use VAE with stochastic latents
+  use_vae: false  # Use deterministic latents (no stochastic sampling)
 training:
   batch_size: 128
   max_steps: 500000
@@ -21,20 +21,21 @@ training:
   lr_schedule_factor: 0.5
   lr_schedule_min_lr: 1.0e-06
   
-  # Auxiliary loss weights (NEW)
-  latent_kl_weight: 1.0    # Compatible with model.use_vae=true
-  mask_kl_weight: 1.0      # Set to 0 to disable mask consistency loss
+  # Auxiliary loss weights - YOUR DESIRED SETUP
+  latent_kl_weight: 0.0    # MUST be 0.0 when model.use_vae=false
+  mask_kl_weight: 0.1      # ENABLED: Mask consistency loss (acts as fixed beta when use_geco=false)
   
-  # GECO control (NEW)
-  use_geco: true           # Set to false to use fixed weights instead
+  # GECO control - DISABLED for fixed weights
+  use_geco: false          # Use fixed weights instead of dynamic beta
   
   elbo_divergence_threshold: 100000000.0
-  geco_goal: 0.15  # VERY strict goal for ultra-high quality
-  geco_lr: 2.0e-06  # Very slow GECO updates
+  # GECO parameters (not used when use_geco=false)
+  geco_goal: 0.15
+  geco_lr: 2.0e-06
   geco_alpha: 0.99  
   geco_beta_init: 1.0  
   geco_beta_min: 1.0e-10
-  geco_speedup: 2.0  # Very gentle β increases
+  geco_speedup: 2.0
 data:
   dataset: d_sprites
   variable_size: false
@@ -42,7 +43,7 @@ data:
   seed: 0
 # Experiment Metadata
 project_name: "genesis_v2"
-run_name: "conservative_geco_goal_same_std"
+run_name: "no_vae_mask_only_fixed_weights"
 save_dir: ./experiments
 # Logging & Checkpointing
 log_every_n_steps: 10

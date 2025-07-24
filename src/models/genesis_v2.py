@@ -21,6 +21,7 @@ class GenesisV2Config:
     normal_std: float = 0.7     # std for normal distribution for the mixture model
     lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
     detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
+    use_vae: bool = True  # whether to use VAE (stochastic) latents or deterministic latents
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
@@ -47,12 +48,13 @@ class GenesisV2(nn.Module):
             ConvGNReLU(config.feat_dim, config.feat_dim, 3, 1, 1),
             nn.Conv2d(config.feat_dim, 2*config.feat_dim, 1))
         
-        # Latent heads
+        # Latent heads - output size depends on whether we use VAE
+        z_output_dim = 2 * config.feat_dim if config.use_vae else config.feat_dim
         self.z_head = nn.Sequential(
             nn.LayerNorm(2*config.feat_dim),
             nn.Linear(2*config.feat_dim, 2*config.feat_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(2*config.feat_dim, 2*config.feat_dim))
+            nn.Linear(2*config.feat_dim, z_output_dim))
         
         # Decoder
         self.decoder = LatentDecoder(
@@ -63,10 +65,13 @@ class GenesisV2(nn.Module):
             feat_dim=config.feat_dim,
             add_coords_every_layer=config.add_coords_every_layer)
         
-        # Autoregressive KL loss module
-        self.latent_kl_loss = AutoregressiveKLLoss(
-            latent_dim=config.feat_dim,
-            hidden_dim=config.lstm_hidden_dim)
+        # Autoregressive KL loss module - only when using VAE
+        if config.use_vae:
+            self.latent_kl_loss = AutoregressiveKLLoss(
+                latent_dim=config.feat_dim,
+                hidden_dim=config.lstm_hidden_dim)
+        else:
+            self.latent_kl_loss = None
      
 
     def encode(self, x, max_steps=None, dynamic=False):
@@ -112,15 +117,18 @@ class GenesisV2(nn.Module):
 
         # Compute mixture loss
         mixture_loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
+        latent_kl_loss_per_slot = None
+        latent_kl_loss = None
 
-        # Compute KL loss if autoregressive prior (per-slot, then sum)
-        latent_kl_loss_per_slot, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=False) # [B, K]
-        latent_kl_loss = latent_kl_loss_per_slot.sum(dim=1) # [B] - sum over slots
-        
+        # Compute latent KL loss only if using VAE and have the necessary components
+        if q_z_k is not None:
+            latent_kl_loss_per_slot, _ = self.latent_kl_loss(q_z_k, z_k, sum_k=False) # [B, K]
+            latent_kl_loss = latent_kl_loss_per_slot.sum(dim=1) # [B] - sum over slots
+
         # Convert decoder's log-alpha to probability space for consistency
         alpha_k = log_alpha_k.squeeze(2).exp() # [B, K, H, W]
 
-        # Compute mask KL loss
+        # Compute mask KL loss (always computed as it's cheap)
         mask_kl_loss_val = categorical_kl_loss(
                 q_probs=masks_k, 
                 p_probs=alpha_k,    # [B, K, H, W]
@@ -154,8 +162,8 @@ class GenesisV2(nn.Module):
             masks: [B, K, H, W] - probability masks
             
         Returns:
-            z_k: [B, K, F] - sampled latents for each object
-            q_z_k: Vectorized Normal distribution [B, K, F] - posterior distribution
+            z_k: [B, K, F] - latents for each object (sampled if use_vae=True, deterministic if False)
+            q_z_k: Vectorized Normal distribution [B, K, F] or None - posterior distribution (None if deterministic)
         """
         # masks are already in regular probability space
         
@@ -177,19 +185,19 @@ class GenesisV2(nn.Module):
         mask_sum = masks.sum(dim=(2, 3))  # [B, K]
         obj_feat_normalized = obj_feat_sum / (mask_sum.unsqueeze(-1) + 1e-5)  # [B, K, 2*F]
         
-        # Apply z_head to get posterior parameters
-        # z_head can handle [B, K, 2*F] directly - applies to last dimension
-        z_out = self.z_head(obj_feat_normalized)  # [B, K, 2*F]
+        # Apply z_head to get parameters
+        z_out = self.z_head(obj_feat_normalized)  # [B, K, output_dim]
         
-        # Split into mean and sigma parameters
-        mu, sigma_logits = z_out.chunk(2, dim=2)  # Each: [B, K, F]
- 
-        # Convert logits to positive sigma values using softplus + small epsilon
-        sigma = torch.nn.functional.softplus(sigma_logits + 0.5) + 1e-8 # [B, K, F]
-        
-        # Sample latents using reparameterization trick (vectorized)
-        q_z_k = Normal(mu, sigma)  # Vectorized Normal distribution [B, K, F]
-        z_k = q_z_k.rsample()  # [B, K, F]
+        if self.config.use_vae:
+            # VAE mode: z_head outputs [mu, sigma_logits]
+            mu, sigma_logits = z_out.chunk(2, dim=2)  # Each: [B, K, F]
+            sigma = torch.nn.functional.softplus(sigma_logits + 0.5) + 1e-8 # [B, K, F]
+            q_z_k = Normal(mu, sigma)  # Vectorized Normal distribution [B, K, F]
+            z_k = q_z_k.rsample()  # [B, K, F] - stochastic sampling
+        else:
+            # Deterministic mode: z_head outputs just mu
+            z_k = z_out  # [B, K, F] - deterministic latents
+            q_z_k = None  # No distribution needed
         
         return z_k, q_z_k
 

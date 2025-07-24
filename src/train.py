@@ -31,10 +31,14 @@ class ModelConfig:
     normal_std: float = 0.7        # std for normal distribution for the mixture model
     lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
     detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
+    use_vae: bool = True  # whether to use VAE (stochastic) latents or deterministic latents
 
     def __post_init__(self):
         assert self.model_type == 'genesis_v2', "Only GenesisV2 is supported"
-        self.model_config = GenesisV2Config(
+        
+    def get_model_config(self):
+        """Create GenesisV2Config from ModelConfig."""
+        return GenesisV2Config(
             K_steps=self.K_steps,
             in_chnls=self.in_chnls,
             img_size=self.img_size,
@@ -44,12 +48,14 @@ class ModelConfig:
             add_coords_every_layer=self.add_coords_every_layer,
             normal_std=self.normal_std,
             lstm_hidden_dim=self.lstm_hidden_dim,
-            detach_recon_masks=self.detach_recon_masks
+            detach_recon_masks=self.detach_recon_masks,
+            use_vae=self.use_vae
         )
 
     def get_model(self):
         if self.model_type == 'genesis_v2':
-            return GenesisV2(self.model_config)
+            model_config = self.get_model_config()
+            return GenesisV2(model_config)
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -70,11 +76,15 @@ class TrainingConfig:
     lr_schedule_factor: float = 0.5
     lr_schedule_min_lr: float = 1e-6
     
-    # Regularization control
-    use_mask_kl_loss: bool = True  # Whether to include mask KL regularization
-    
+    # Auxiliary loss weights - set to 0 to disable computation
+    latent_kl_weight: float = 1.0   # Weight for latent KL loss (set to 0 to disable VAE)
+    mask_kl_weight: float = 1.0     # Weight for mask KL loss (set to 0 to disable mask consistency)
+  
     # Training stability
     elbo_divergence_threshold: float = 1e8  # Stop training if ELBO exceeds this
+      
+    # GECO control
+    use_geco: bool = True           # Whether to use GECO for dynamic beta adjustment
     
     # GECO (Generalized ELBO Constrained Optimization) parameters
     geco_goal: float = 0.5655  # Target reconstruction error per pixel
@@ -131,6 +141,16 @@ class ExperimentConfig:
     save_top_k: int = 3
     monitor_metric: str = "loss_val/total_loss"  # For checkpointing
     monitor_mode: str = "min"
+    
+    def __post_init__(self):
+        """Validate compatibility between model and training configurations."""
+        # Check VAE compatibility
+        if not self.model.use_vae and self.training.latent_kl_weight > 0:
+            raise ValueError(
+                f"Incompatible configuration: model.use_vae=False but training.latent_kl_weight={self.training.latent_kl_weight} > 0. "
+                f"Cannot apply latent KL loss with deterministic latents. "
+                f"Either set model.use_vae=True or training.latent_kl_weight=0.0"
+            )
 
 
 class DataModule(pl.LightningDataModule):
@@ -185,17 +205,21 @@ class TrainingModule(pl.LightningModule):
         # Initialize model
         self.model = self.config.model.get_model()
         
-        # Initialize GECO using the helper function for cleaner configuration
-        self.geco = create_geco_for_image_size(
-            img_size=self.config.model.img_size,
-            channels=self.config.model.in_chnls,
-            goal_per_pixel=self.config.training.geco_goal,
-            base_step_size=self.config.training.geco_lr,
-            alpha=self.config.training.geco_alpha,
-            beta_init=self.config.training.geco_beta_init,
-            beta_min=self.config.training.geco_beta_min,
-            speedup=self.config.training.geco_speedup
-        )
+        # Initialize GECO only if enabled
+        if self.config.training.use_geco:
+            self.geco = create_geco_for_image_size(
+                img_size=self.config.model.img_size,
+                channels=self.config.model.in_chnls,
+                goal_per_pixel=self.config.training.geco_goal,
+                base_step_size=self.config.training.geco_lr,
+                alpha=self.config.training.geco_alpha,
+                beta_init=self.config.training.geco_beta_init,
+                beta_min=self.config.training.geco_beta_min,
+                speedup=self.config.training.geco_speedup
+            )
+        else:
+            self.geco = None
+            
         # Flag to log static parameters only once
         self._logged_static_params = False
     
@@ -215,7 +239,9 @@ class TrainingModule(pl.LightningModule):
             "parameters/weight_decay": self.config.training.weight_decay,
             "parameters/batch_size": self.config.training.batch_size,
             "parameters/max_steps": self.config.training.max_steps,
-            "parameters/use_mask_kl_loss": self.config.training.use_mask_kl_loss,
+            "parameters/latent_kl_weight": self.config.training.latent_kl_weight,
+            "parameters/mask_kl_weight": self.config.training.mask_kl_weight,
+            "parameters/use_geco": self.config.training.use_geco,
             "parameters/elbo_divergence_threshold": self.config.training.elbo_divergence_threshold,
             "parameters/geco_goal": self.config.training.geco_goal,
             "parameters/geco_lr": self.config.training.geco_lr,
@@ -243,49 +269,75 @@ class TrainingModule(pl.LightningModule):
         
         # Extract loss components from GenesisV2 output
         mixture_loss = output["mixture_loss"]  # Reconstruction error
-        latent_kl_loss = output["latent_kl_loss"]  # KL loss for latents
-        latent_kl_loss_per_slot = output["latent_kl_loss_per_slot"]  # Per-slot latent KL [B, K]
-        mask_kl_loss = output["mask_kl_loss"]  # KL loss for masks
+        mask_kl_loss = output["mask_kl_loss"]  # Always computed (cheap)
         
-        # Total KL divergence (conditionally include mask KL)
-        if self.config.training.use_mask_kl_loss:
-            total_kl = latent_kl_loss + mask_kl_loss
-        else:
-            total_kl = latent_kl_loss
-        
-        # Compute total loss using GECO
-        total_loss = self.geco.loss(mixture_loss.mean(), total_kl.mean())
-        
-        # Compute ELBO for monitoring (reconstruction + KL)
-        elbo = mixture_loss.mean() + total_kl.mean()
-        
-        # Check for ELBO divergence
-        elbo_diverged = elbo.item() > self.config.training.elbo_divergence_threshold
+        # Extract KL losses (will be None if compute_latent_kl=False)
+        latent_kl_loss = output["latent_kl_loss"]  # Either tensor or None
+        latent_kl_loss_per_slot = output["latent_kl_loss_per_slot"]  # Either tensor or None
         
         # Compute normalized reconstruction error (resolution-independent)
         num_elements = image.shape[1:].numel()  # channels * height * width
         mixture_loss_per_element = mixture_loss.mean() / num_elements
         
-        # Prepare essential metrics only
+        # Build total weighted KL and collect metrics by only adding non-zero weighted terms
+        total_weighted_kl = torch.zeros_like(mixture_loss)
+        
+        # Prepare base metrics
         metrics = {
             # Core loss terms
-            f"loss_{mode}/total_loss": total_loss,
+            f"loss_{mode}/total_loss": None,  # Will be filled after total_loss computation
             f"loss_{mode}/mixture_loss": mixture_loss.mean(),
             f"loss_{mode}/err_per_elem": mixture_loss_per_element,
-            f"loss_{mode}/latent_kl": latent_kl_loss.mean(),
             f"loss_{mode}/mask_kl": mask_kl_loss.mean(),
-            f"loss_{mode}/total_kl": total_kl.mean(),
-            f"loss_{mode}/elbo": elbo,
-            # Essential GECO metrics
-            f"geco_{mode}/beta": self.geco.beta.item(),
-            f"geco_{mode}/err_ema": self.geco.err_ema.item() if self.geco._err_ema_initialized else 0.0,
-            f"geco_{mode}/constraint": (self.geco.goal - self.geco.err_ema).item() if self.geco._err_ema_initialized else 0.0,
         }
         
-        # Add per-slot latent KL losses
-        latent_kl_per_slot_mean = latent_kl_loss_per_slot.mean(0)  # [K] - mean over batch
-        for slot_idx in range(latent_kl_per_slot_mean.shape[0]):
-            metrics[f"slot_{mode}/kl_latent_{slot_idx}"] = latent_kl_per_slot_mean[slot_idx].item()
+        # Add latent KL terms is computed (for VAE)
+        if latent_kl_loss is not None:
+            total_weighted_kl = total_weighted_kl + self.config.training.latent_kl_weight * latent_kl_loss
+            metrics.update({
+                f"loss_{mode}/latent_kl": latent_kl_loss.mean(),
+                f"loss_{mode}/weighted_latent_kl": (self.config.training.latent_kl_weight * latent_kl_loss).mean(),
+            })
+            
+            # Add per-slot latent KL metrics (computed together with latent_kl_loss)
+            latent_kl_per_slot_mean = latent_kl_loss_per_slot.mean(0)  # [K] - mean over batch
+            for slot_idx in range(latent_kl_per_slot_mean.shape[0]):
+                metrics[f"slot_{mode}/kl_latent_{slot_idx}"] = latent_kl_per_slot_mean[slot_idx].item()
+        
+        # Add mask KL terms and metrics (always - weight of 0 automatically nullifies impact)
+        total_weighted_kl = total_weighted_kl + self.config.training.mask_kl_weight * mask_kl_loss
+        metrics[f"loss_{mode}/weighted_mask_kl"] = (self.config.training.mask_kl_weight * mask_kl_loss).mean()
+        
+        # Compute ELBO (reconstruction + weighted KL) - this is our actual training objective
+        elbo = mixture_loss.mean() + total_weighted_kl.mean()
+        
+        # Compute total loss - either with GECO or fixed weights
+        if self.config.training.use_geco:
+            # Use GECO for dynamic beta adjustment
+            total_loss = self.geco.loss(mixture_loss.mean(), total_weighted_kl.mean())
+            current_beta = self.geco.beta.item()
+        else:
+            # Use fixed weights - total loss is just the ELBO
+            total_loss = elbo
+            current_beta = 1.0  # Fixed beta for logging
+        
+        # Check for ELBO divergence
+        elbo_diverged = elbo.item() > self.config.training.elbo_divergence_threshold
+        
+        # Complete the metrics that needed values computed later
+        metrics.update({
+            f"loss_{mode}/total_loss": total_loss,
+            f"loss_{mode}/total_weighted_kl": total_weighted_kl.mean(),
+            f"loss_{mode}/elbo": elbo,
+        })
+        
+        # Add GECO or fixed weight metrics
+        if self.config.training.use_geco:
+            metrics.update({
+                f"geco_{mode}/beta": current_beta,
+                f"geco_{mode}/err_ema": self.geco.err_ema.item() if self.geco._err_ema_initialized else 0.0,
+                f"geco_{mode}/constraint": (self.geco.goal - self.geco.err_ema).item() if self.geco._err_ema_initialized else 0.0,
+            })
         
         return total_loss, metrics, output, elbo_diverged
     
