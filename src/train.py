@@ -76,6 +76,10 @@ class TrainingConfig:
     lr_schedule_factor: float = 0.5
     lr_schedule_min_lr: float = 1e-6
     
+    # Reconstruction loss weights - control sharpness vs probabilistic behavior
+    mixture_weight: float = 1.0     # Weight for mixture model loss (probabilistic)
+    mse_weight: float = 0.0         # Weight for MSE loss (sharp reconstructions)
+    
     # Auxiliary loss weights - set to 0 to disable computation
     latent_kl_weight: float = 1.0   # Weight for latent KL loss (set to 0 to disable VAE)
     mask_kl_weight: float = 1.0     # Weight for mask KL loss (set to 0 to disable mask consistency)
@@ -239,6 +243,8 @@ class TrainingModule(pl.LightningModule):
             "parameters/weight_decay": self.config.training.weight_decay,
             "parameters/batch_size": self.config.training.batch_size,
             "parameters/max_steps": self.config.training.max_steps,
+            "parameters/mixture_weight": self.config.training.mixture_weight,
+            "parameters/mse_weight": self.config.training.mse_weight,
             "parameters/latent_kl_weight": self.config.training.latent_kl_weight,
             "parameters/mask_kl_weight": self.config.training.mask_kl_weight,
             "parameters/use_geco": self.config.training.use_geco,
@@ -268,7 +274,8 @@ class TrainingModule(pl.LightningModule):
         output = self.model(image)
         
         # Extract loss components from GenesisV2 output
-        mixture_loss = output["mixture_loss"]  # Reconstruction error
+        mixture_loss = output["mixture_loss"]  # Probabilistic reconstruction loss
+        mse_loss = output["mse_loss"]          # Sharp reconstruction loss
         mask_kl_loss = output["mask_kl_loss"]  # Always computed (cheap)
         
         # Extract KL losses (will be None if compute_latent_kl=False)
@@ -278,6 +285,13 @@ class TrainingModule(pl.LightningModule):
         # Compute normalized reconstruction error (resolution-independent)
         num_elements = image.shape[1:].numel()  # channels * height * width
         mixture_loss_per_element = mixture_loss.mean() / num_elements
+        mse_loss_per_element = mse_loss.mean() / num_elements
+        
+        # Build total reconstruction loss
+        total_reconstruction_loss = (
+            self.config.training.mixture_weight * mixture_loss + 
+            self.config.training.mse_weight * mse_loss
+        )
         
         # Build total weighted KL and collect metrics by only adding non-zero weighted terms
         total_weighted_kl = torch.zeros_like(mixture_loss)
@@ -287,7 +301,10 @@ class TrainingModule(pl.LightningModule):
             # Core loss terms
             f"loss_{mode}/total_loss": None,  # Will be filled after total_loss computation
             f"loss_{mode}/mixture_loss": mixture_loss.mean(),
+            f"loss_{mode}/mse_loss": mse_loss.mean(),
+            f"loss_{mode}/total_reconstruction": total_reconstruction_loss.mean(),
             f"loss_{mode}/err_per_elem": mixture_loss_per_element,
+            f"loss_{mode}/mse_per_elem": mse_loss_per_element,
             f"loss_{mode}/mask_kl": mask_kl_loss.mean(),
         }
         
@@ -309,12 +326,12 @@ class TrainingModule(pl.LightningModule):
         metrics[f"loss_{mode}/weighted_mask_kl"] = (self.config.training.mask_kl_weight * mask_kl_loss).mean()
         
         # Compute ELBO (reconstruction + weighted KL) - this is our actual training objective
-        elbo = mixture_loss.mean() + total_weighted_kl.mean()
+        elbo = total_reconstruction_loss.mean() + total_weighted_kl.mean()
         
         # Compute total loss - either with GECO or fixed weights
         if self.config.training.use_geco:
             # Use GECO for dynamic beta adjustment
-            total_loss = self.geco.loss(mixture_loss.mean(), total_weighted_kl.mean())
+            total_loss = self.geco.loss(total_reconstruction_loss.mean(), total_weighted_kl.mean())
             current_beta = self.geco.beta.item()
         else:
             # Use fixed weights - total loss is just the ELBO

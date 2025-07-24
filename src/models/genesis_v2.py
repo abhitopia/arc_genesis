@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from ..modules.unet import UNet, ConvGNReLU
 from ..modules.masks_stickbreaking import StickBreakingSegmentation
 from ..modules.latent_decoder import LatentDecoder
-from ..modules.losses import normal_mixture_loss, categorical_kl_loss
+from ..modules.losses import normal_mixture_loss, mse_reconstruction_loss, categorical_kl_loss
 from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 @dataclass
@@ -115,8 +115,9 @@ class GenesisV2(nn.Module):
         # Reconstruct image by marginalizing over K objects
         recon = (recon_k * log_alpha_k.exp()).sum(dim=1) # [B, C, H, W]
 
-        # Compute mixture loss
+        # Compute dual reconstruction losses
         mixture_loss = normal_mixture_loss(x, recon_k, log_alpha_k, std=self.config.normal_std) # [B]
+        mse_loss = mse_reconstruction_loss(x, recon_k, log_alpha_k) # [B]
         latent_kl_loss_per_slot = None
         latent_kl_loss = None
 
@@ -138,6 +139,7 @@ class GenesisV2(nn.Module):
         return {
             # Losses
             'mixture_loss': mixture_loss,
+            'mse_loss': mse_loss,
             'latent_kl_loss': latent_kl_loss,
             'latent_kl_loss_per_slot': latent_kl_loss_per_slot,
             'mask_kl_loss': mask_kl_loss_val,

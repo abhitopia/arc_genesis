@@ -40,6 +40,34 @@ def normal_mixture_loss(x, recon_k, log_alpha_k, std=0.7):
     # Sum over spatial and channel dimensions
     return loss_per_pixel.sum(dim=(1, 2, 3))  # [B]
 
+def mse_reconstruction_loss(x, recon_k, log_alpha_k):
+    """
+    Compute MSE reconstruction loss for sharp object reconstructions.
+    Args:
+        x: [B, C, H, W] - input image
+        recon_k: [B, K, C, H, W] - object reconstructions  
+        log_alpha_k: [B, K, 1, H, W] - log mixing coefficients
+        
+    Returns:
+        loss: MSE reconstruction loss per batch item
+    """
+    B, K, C, H, W = recon_k.shape
+    
+    # Expand input to match object dimension: [B, C, H, W] -> [B, 1, C, H, W]
+    x_expanded = x.unsqueeze(1).expand(-1, K, -1, -1, -1)  # [B, K, C, H, W]
+    
+    # Expand alpha to match channels
+    # log_alpha_k: [B, K, 1, H, W] -> [B, K, C, H, W]
+    alpha_expanded = log_alpha_k.expand(-1, -1, C, -1, -1).exp()  # [B, K, C, H, W]
+    
+    # Compute weighted MSE for each object
+    mse_per_object = ((x_expanded - recon_k) ** 2) * alpha_expanded  # [B, K, C, H, W]
+    
+    # Sum over objects, channels, and spatial dimensions
+    return mse_per_object.sum(dim=(1, 2, 3, 4))  # [B]
+
+
+
 def categorical_kl_loss(q_probs, p_probs, detach_p=True):
     """
     Compute KL divergence between two categorical probability distributions.

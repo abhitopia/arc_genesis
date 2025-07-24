@@ -1,0 +1,57 @@
+model:
+  model_type: genesis_v2
+  K_steps: 5
+  in_chnls: 3
+  img_size: 64
+  feat_dim: 64
+  kernel: gaussian
+  broadcast_size: 16
+  add_coords_every_layer: true
+  normal_std: 0.7  # Not used when mse_weight=1.0
+  detach_recon_masks: true
+  use_vae: false  # Use deterministic latents (no stochastic sampling)
+  lstm_hidden_dim: 256  # Not used when use_vae=false
+training:
+  batch_size: 128
+  max_steps: 500000
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  use_lr_scheduler: true
+  lr_schedule_patience: 5
+  lr_schedule_factor: 0.5
+  lr_schedule_min_lr: 1.0e-06
+  
+  # Reconstruction loss weights - PURE MSE APPROACH
+  mixture_weight: 0.0     # DISABLED: No probabilistic behavior
+  mse_weight: 1.0         # PURE MSE: Maximum sharpness
+  
+  # Auxiliary loss weights - set to 0 to disable computation
+  latent_kl_weight: 0.0    # MUST be 0.0 when model.use_vae=false
+  mask_kl_weight: 0.0      # DISABLED: Let attention and decoder masks be independent
+  elbo_divergence_threshold: 100000000.0
+  
+  # GECO control - DISABLED for fixed weights
+  use_geco: false          # Use fixed weights instead of dynamic beta
+  # GECO parameters (not used when use_geco=false)
+  geco_goal: 0.15
+  geco_lr: 2.0e-06
+  geco_alpha: 0.99  
+  geco_beta_init: 1.0  
+  geco_beta_min: 1.0e-10
+  geco_speedup: 2.0
+data:
+  dataset: d_sprites
+  variable_size: false
+  is_discrete: false
+  seed: 0
+# Experiment Metadata
+project_name: "genesis_v2"
+run_name: "pure_mse_reconstruction"
+save_dir: ./experiments
+# Logging & Checkpointing
+log_every_n_steps: 10
+val_check_interval: 1000
+num_visualizations: 8
+save_top_k: 3
+monitor_metric: "loss_val/total_loss"
+monitor_mode: min 
