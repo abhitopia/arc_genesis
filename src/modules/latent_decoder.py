@@ -41,6 +41,9 @@ class LatentDecoder(nn.Module):
     input_channels          : int  - channels of latent input (default = 256)
     output_channels         : int  - channels of final image / logits (default = 4)
     output_size             : int  (power of 2) - desired image size (default = 16)
+    num_layers              : int | None - total # of conv blocks (incl. up-sampling
+                                ones).  If None (default) it equals the number of
+                                up-sampling stages.
     broadcast_size          : int  (power of 2) - side length after the BroadcastLayer (default = 4)
     feat_dim                : int | None - hidden width; default = `input_channels`
     add_coords_every_layer  : bool - True → inject coords at every scale (default = False)
@@ -51,9 +54,11 @@ class LatentDecoder(nn.Module):
         input_channels: int,
         output_channels: int,
         output_size: int,
+        num_layers: int | None = None,
         broadcast_size: int = 4,
         feat_dim: int | None = None,
         add_coords_every_layer: bool = False,
+
     ):
         super().__init__()
 
@@ -64,17 +69,32 @@ class LatentDecoder(nn.Module):
 
         feat_dim = feat_dim or input_channels               # hidden width
         num_ups = int(math.log2(output_size // broadcast_size))
+        num_layers = num_layers or num_ups                         # default behaviour
+
  
+        if num_layers < num_ups:
+            raise ValueError(
+                f"`num_layers` ({num_layers}) must be ≥ number of required "
+                f"up-sampling stages ({num_ups})."
+            )
+        extra_layers = num_layers - num_ups                        # ← how many keep‑size
+
 
         # import ipdb; ipdb.set_trace()
         # ---- construct network --------------------------------------------
-        layers: list[nn.Module] = [BroadcastLayer(broadcast_size)]
-        in_c = input_channels
+        layers = [
+            BroadcastLayer(broadcast_size),
+            PixelCoords(broadcast_size)          # ← always once, right after broadcast
+        ]
+        in_c     = input_channels + 2            # +2 for the (x,y) channels
         cur_size = broadcast_size
 
+        first_conv_block = True                  # will be False after we create one
+
+        # Upsampling stages
         for i in range(num_ups):
-            # inject coords: always on first iteration, or every iteration if requested
-            if i == 0 or add_coords_every_layer:
+            # add coords **only** from the second conv block onward
+            if add_coords_every_layer and not first_conv_block:
                 layers.append(PixelCoords(cur_size))
                 in_c += 2
 
@@ -98,6 +118,27 @@ class LatentDecoder(nn.Module):
             )
             in_c = out_c
             cur_size *= 2  # track spatial size
+            first_conv_block = False
+
+
+        # -- ❷ extra keep‑resolution blocks -----------------------------------------
+        for _ in range(extra_layers):
+
+            # same rule: skip the very first conv block (if there was no up‑sampling)
+            if add_coords_every_layer and not first_conv_block:
+                layers.append(PixelCoords(cur_size))
+                in_c += 2
+
+            layers.extend(
+                [
+                    nn.Conv2d(in_c, feat_dim, kernel_size=3, stride=1, padding=1),
+                    _groupnorm(feat_dim),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+            in_c = feat_dim
+            first_conv_block = False             # after first extra block we’re safe
+
 
         # 1×1 projection to the requested number of channels
         layers.append(nn.Conv2d(in_c, output_channels, kernel_size=1))
@@ -129,6 +170,7 @@ if __name__ == "__main__":
         input_channels=128,
         output_channels=3,           # RGB
         feat_dim=192,
+        num_layers=8,
         add_coords_every_layer=True
     )
     x = torch.randn(8, 128)
