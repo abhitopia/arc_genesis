@@ -158,7 +158,7 @@ class DataConfig:
                 min_size=32 if self.variable_size else 64,
                 max_size=64,
                 num_colors=10,
-                num_objects=3,
+                num_objects=None,
                 unique_colors=True,
                 fixed_background=False
             )
