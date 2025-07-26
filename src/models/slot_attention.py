@@ -13,7 +13,7 @@ from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 @dataclass
 class SlotAttentionConfig:
-    num_slots: int = 7
+    K: int = 7  # Number of slots (unified parameter)
     num_iterations: int = 3
     num_heads: int = 4
     slot_dim: int = None  # If None, uses feat_dim
@@ -59,7 +59,7 @@ class SlotAttentionModel(nn.Module):
         
         # SlotAttention module
         self.slot_attention = MultiHeadSlotAttentionImplicit(
-            num_slots=config.num_slots,
+            num_slots=config.K,
             dim=self.slot_dim,
             heads=config.num_heads,
             iters=config.num_iterations,
@@ -115,22 +115,22 @@ class SlotAttentionModel(nn.Module):
         x_projected = self.feat_projection(x_flat)  # [B, H*W, slot_dim]
         
         # Get slot representations
-        slots = self.slot_attention(x_projected)  # [B, num_slots, slot_dim]
+        slots = self.slot_attention(x_projected)  # [B, K, slot_dim]
         
         # Project slots back to decoder input dimension  
-        decoder_input = self.slot_to_decoder(slots)  # [B, num_slots, feat_dim]
+        decoder_input = self.slot_to_decoder(slots)  # [B, K, feat_dim]
         
         # Handle VAE vs deterministic latents
         if self.config.use_vae and self.vae_head is not None:
             # Convert to VAE parameters and sample
-            z_out = self.vae_head(decoder_input)  # [B, num_slots, 2*feat_dim]
-            mu, sigma_logits = z_out.chunk(2, dim=2)  # Each: [B, num_slots, feat_dim]
+            z_out = self.vae_head(decoder_input)  # [B, K, 2*feat_dim]
+            mu, sigma_logits = z_out.chunk(2, dim=2)  # Each: [B, K, feat_dim]
             sigma = F.softplus(sigma_logits + 0.5) + 1e-8
             q_z_k = Normal(mu, sigma)  # Vectorized Normal distribution [B, K, F]
-            z_k = q_z_k.rsample()  # [B, num_slots, feat_dim] - stochastic sampling
+            z_k = q_z_k.rsample()  # [B, K, feat_dim] - stochastic sampling
         else:
             # Use projected slots directly as deterministic latents
-            z_k = decoder_input  # [B, num_slots, feat_dim]
+            z_k = decoder_input  # [B, K, feat_dim]
             q_z_k = None
         
         # Decode slots to RGBA images
@@ -153,12 +153,18 @@ class SlotAttentionModel(nn.Module):
         # Convert decoder's log-alpha to probability space
         alpha_k = log_alpha_k.squeeze(2).exp()  # [B, K, H, W]
         
+        # SlotAttention doesn't have mask KL loss (no separate attention vs reconstruction masks)
+        # Set to zero for compatibility with training loop
+        batch_size = x.shape[0]
+        mask_kl_loss = torch.zeros(batch_size, device=x.device)
+        
         return {
             # Losses
             'mixture_loss': mixture_loss,
             'mse_loss': mse_loss,
             'latent_kl_loss': latent_kl_loss,
             'latent_kl_loss_per_slot': latent_kl_loss_per_slot,
+            'mask_kl_loss': mask_kl_loss,  # Zero for SlotAttention (no mask consistency loss)
             
             # Main outputs
             'recon': recon,                         # [B, C, H, W]

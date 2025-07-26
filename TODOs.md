@@ -1,7 +1,7 @@
 - [x] Optimize and vectorize
-- [ ] Check data generation, should have more than 3 objects and variable
+- [x] Make seeding autoregressive (or use Slot Attention)
 - [ ] Make visualisation on random samples
-- [ ] Make seeding autoregressive
+- [ ] Check data generation, should have more than 3 objects and variable
 - [ ] Implement reverse ISB ordered version
 
 - [ ] Size variable

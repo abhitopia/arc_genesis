@@ -1,7 +1,7 @@
 import os
 import warnings
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any, Tuple, Union
 
 import torch
@@ -13,51 +13,95 @@ import wandb
 # Import our modules
 from .data.d_sprites import VariableDSpritesConfig
 from .models.genesis_v2 import GenesisV2Config, GenesisV2
+from .models.slot_attention import SlotAttentionConfig, SlotAttentionModel
 from .modules.geco import create_geco_for_image_size
 from utils.visualisation import make_slot_figure, extract_slot_stats_for_sample
 import matplotlib.pyplot as plt
 
 
 @dataclass
-class ModelConfig:
-    model_type: str = 'genesis_v2'
-    K_steps: int = 5
+class BaseModelConfig:
+    """Base configuration class with common parameters for all models."""
+    model_type: str  # Must be specified in subclasses
+    K: int = 5  # Number of slots/steps - unified across models
     in_chnls: int = 3
     img_size: int = 64
     feat_dim: int = 64
-    kernel: str = 'gaussian'
     broadcast_size: int = 4
     add_coords_every_layer: bool = False
     normal_std: float = 0.7        # std for normal distribution for the mixture model
+    use_vae: bool = True           # whether to use VAE (stochastic) latents or deterministic latents
     lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
+
+
+@dataclass
+class GenesisV2ModelConfig(BaseModelConfig):
+    """Configuration for GenesisV2 model."""
+    model_type: str = 'genesis_v2'
+    kernel: str = 'gaussian'
     detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
-    use_vae: bool = True  # whether to use VAE (stochastic) latents or deterministic latents
 
-    def __post_init__(self):
-        assert self.model_type == 'genesis_v2', "Only GenesisV2 is supported"
+
+@dataclass
+class SlotAttentionModelConfig(BaseModelConfig):
+    """Configuration for SlotAttention model."""
+    model_type: str = 'slot_attention'
+    # K: int = 7 inherited from base (good default for SlotAttention)
+    num_iterations: int = 3
+    num_heads: int = 4
+    slot_dim: Optional[int] = None  # If None, uses feat_dim
+    implicit_grads: bool = False
+
+
+def create_model_config_from_dict(config_dict: Dict[str, Any]) -> BaseModelConfig:
+    """
+    Factory function to create appropriate model config from dictionary.
+    
+    Args:
+        config_dict: Dictionary containing model configuration
         
-    def get_model_config(self):
-        """Create GenesisV2Config from ModelConfig."""
-        return GenesisV2Config(
-            K_steps=self.K_steps,
-            in_chnls=self.in_chnls,
-            img_size=self.img_size,
-            feat_dim=self.feat_dim,
-            kernel=self.kernel,
-            broadcast_size=self.broadcast_size,
-            add_coords_every_layer=self.add_coords_every_layer,
-            normal_std=self.normal_std,
-            lstm_hidden_dim=self.lstm_hidden_dim,
-            detach_recon_masks=self.detach_recon_masks,
-            use_vae=self.use_vae
-        )
+    Returns:
+        Appropriate model config instance (GenesisV2ModelConfig or SlotAttentionModelConfig)
+    """
+    model_type = config_dict.get('model_type', 'genesis_v2')
+    
+    if model_type == 'genesis_v2':
+        return GenesisV2ModelConfig(**config_dict)
+    elif model_type == 'slot_attention':
+        return SlotAttentionModelConfig(**config_dict)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}. Supported types: ['genesis_v2', 'slot_attention']")
 
-    def get_model(self):
-        if self.model_type == 'genesis_v2':
-            model_config = self.get_model_config()
-            return GenesisV2(model_config)
-        else:
-            raise ValueError(f"Unsupported model type: {self.model_type}")
+
+def create_model_from_config(config: BaseModelConfig):
+    """
+    Factory function to create model instance from config.
+    
+    Args:
+        config: Model configuration instance
+        
+    Returns:
+        Model instance (GenesisV2 or SlotAttentionModel)
+    """
+    config_dict = {k: v for k, v in asdict(config).items() if k != 'model_type'}
+
+    if isinstance(config, GenesisV2ModelConfig):
+        # Convert to GenesisV2Config for the model
+        model_config = GenesisV2Config(**config_dict)
+        return GenesisV2(model_config)
+    elif isinstance(config, SlotAttentionModelConfig):
+        # Convert to SlotAttentionConfig for the model
+        model_config = SlotAttentionConfig(**config_dict)
+        return SlotAttentionModel(model_config)
+    else:
+        raise ValueError(f"Unsupported model config type: {type(config)}")
+
+
+# Legacy ModelConfig for backward compatibility - maps to GenesisV2ModelConfig
+@dataclass 
+class ModelConfig(GenesisV2ModelConfig):
+    """Legacy ModelConfig - now an alias for GenesisV2ModelConfig for backward compatibility."""
+    K: int = 5  # Keep GenesisV2's default for backward compatibility
 
 
 @dataclass
@@ -126,8 +170,8 @@ class DataConfig:
 class ExperimentConfig:
     """Main experiment configuration combining all sub-configs."""
     
-    # Sub-configurations
-    model: ModelConfig = field(default_factory=ModelConfig)
+    # Sub-configurations - model can be either GenesisV2 or SlotAttention
+    model: Union[GenesisV2ModelConfig, SlotAttentionModelConfig] = field(default_factory=GenesisV2ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
     
@@ -155,6 +199,26 @@ class ExperimentConfig:
                 f"Cannot apply latent KL loss with deterministic latents. "
                 f"Either set model.use_vae=True or training.latent_kl_weight=0.0"
             )
+
+
+def create_default_experiment_for_model(model_type: str = 'genesis_v2') -> ExperimentConfig:
+    """
+    Create a default experiment configuration for the specified model type.
+    
+    Args:
+        model_type: Type of model ('genesis_v2' or 'slot_attention')
+        
+    Returns:
+        ExperimentConfig with appropriate model configuration
+    """
+    if model_type == 'genesis_v2':
+        model_config = GenesisV2ModelConfig()
+    elif model_type == 'slot_attention':
+        model_config = SlotAttentionModelConfig()
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}. Supported types: ['genesis_v2', 'slot_attention']")
+    
+    return ExperimentConfig(model=model_config)
 
 
 class DataModule(pl.LightningDataModule):
@@ -207,7 +271,7 @@ class TrainingModule(pl.LightningModule):
         self.save_hyperparameters(vars(config))
         
         # Initialize model
-        self.model = self.config.model.get_model()
+        self.model = create_model_from_config(self.config.model)
         
         # Initialize GECO only if enabled
         if self.config.training.use_geco:
@@ -255,12 +319,29 @@ class TrainingModule(pl.LightningModule):
             "parameters/geco_beta_init": self.config.training.geco_beta_init,
             "parameters/geco_beta_min": self.config.training.geco_beta_min,
             "parameters/geco_speedup": self.config.training.geco_speedup,
-            "model/K_steps": self.config.model.K_steps,
             "model/img_size": self.config.model.img_size,
             "model/feat_dim": self.config.model.feat_dim,
             "model/normal_std": self.config.model.normal_std,
             "model/lstm_hidden_dim": self.config.model.lstm_hidden_dim,
+            "model/K": self.config.model.K,
         }
+        
+        # Add model-specific parameters based on model type
+        if self.config.model.model_type == 'genesis_v2':
+            static_params.update({
+                "model/kernel": self.config.model.kernel,
+                "model/detach_recon_masks": self.config.model.detach_recon_masks,
+            })
+        elif self.config.model.model_type == 'slot_attention':
+            slot_params = {
+                "model/num_iterations": self.config.model.num_iterations,
+                "model/num_heads": self.config.model.num_heads,
+                "model/slot_dim": self.config.model.slot_dim,
+                "model/implicit_grads": self.config.model.implicit_grads,
+            }
+            # Filter out None values (PyTorch Lightning can't log None)
+            slot_params = {k: v for k, v in slot_params.items() if v is not None}
+            static_params.update(slot_params)
         
         self.log_dict(static_params, on_step=False, on_epoch=True)
         self._logged_static_params = True
@@ -404,17 +485,20 @@ class TrainingModule(pl.LightningModule):
             image = batch['image'][i]
             recon = output['recon'][i]
             
-            # Extract the slot statistics for this specific sample
+            # Extract the slot statistics for this specific sample (works for both model types now)
             slot_stats = extract_slot_stats_for_sample(output, sample_idx=i)
             
-            # Create the figure with a smaller size
+            # Use unified K parameter for max_slots
+            max_slots = self.config.model.K
+            
+            # Create the figure (works for both model types)
             fig = make_slot_figure(
                 image=image,
                 recon=recon,
                 slot_stats=slot_stats,
-                max_slots=self.config.model.K_steps,
-                figsize_per_slot=(1.5, 1.5)  # Make figure smaller
-            )    
+                max_slots=max_slots,
+                figsize_per_slot=(1.5, 1.5)
+            )
       
             # Log to Wandb with a lower DPI for smaller file size
             try:
@@ -426,7 +510,7 @@ class TrainingModule(pl.LightningModule):
                 print(f"[DEBUG] ERROR logging val_sample_{i} to Wandb: {e}")
             finally:
                 plt.close(fig)
-    
+
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step."""
         loss, metrics, output, elbo_diverged = self._compute_loss(batch, mode="test")

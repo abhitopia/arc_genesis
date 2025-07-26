@@ -1,7 +1,7 @@
 """
 cli.py
 ======
-Command-line interface for Genesis V2 training using typer.
+Command-line interface for multi-model training (GenesisV2, SlotAttention) using typer.
 
 Author 2025 – MIT licence
 """
@@ -20,7 +20,8 @@ from pytorch_lightning.loggers import WandbLogger
 from src.train import (
     ExperimentConfig, DataModule, TrainingModule, 
     ModelConfig, TrainingConfig, DataConfig,
-    create_trainer
+    create_trainer, create_default_experiment_for_model,
+    create_model_config_from_dict
 )
 from src.config_utils import save_config_to_yaml, load_config_from_yaml
 
@@ -52,7 +53,7 @@ def load_config_from_checkpoint(checkpoint_path: str) -> ExperimentConfig:
         if hasattr(model_params, '__dict__'):  # It's an object
             config.model = model_params
         elif isinstance(model_params, dict):  # It's a dictionary
-            config.model = ModelConfig(**model_params)
+            config.model = create_model_config_from_dict(model_params)
         
     if 'training' in hyper_params:
         training_params = hyper_params['training']
@@ -184,14 +185,12 @@ def _handle_compile_compatibility(model: TrainingModule, checkpoint_state_dict: 
 
 app = typer.Typer(
     name="genesis-cli",
-    help="Genesis V2 training CLI",
+    help="Multi-model training CLI (GenesisV2, SlotAttention)",
     no_args_is_help=True
 )
 
 
-def create_default_experiment() -> ExperimentConfig:
-    """Create a default experiment configuration."""
-    return ExperimentConfig()
+
 
 
 @app.command()
@@ -200,6 +199,11 @@ def generate_config(
         "config.yaml",
         "--output", "-o",
         help="Output path for the generated config file"
+    ),
+    model_type: str = typer.Option(
+        "genesis_v2",
+        "--model-type", "-MT",
+        help="Type of model to generate config for ('genesis_v2' or 'slot_attention')"
     )
 ):
     """
@@ -211,8 +215,8 @@ def generate_config(
     output_file = Path(output_path)
     
     # Create default config
-    config = create_default_experiment()
-    typer.echo(f"Generating default experiment config...")
+    config = create_default_experiment_for_model(model_type)
+    typer.echo(f"Generating default experiment config for model type: {model_type}...")
     
     # Save config to YAML
     try:
@@ -278,7 +282,7 @@ def train(
     )
 ):
     """
-    Train Genesis V2 model with the specified configuration.
+    Train model (GenesisV2 or SlotAttention) with the specified configuration.
     
     Supports three training modes:
     
@@ -369,7 +373,14 @@ def train(
     typer.echo(f"   Project: {config.project_name}")
     typer.echo(f"   Run name: {config.run_name}")
     typer.echo(f"   Dataset: {config.data.dataset}")
-    typer.echo(f"   Model: Genesis V2 (K_steps={config.model.K_steps}, img_size={config.model.img_size})")
+    # Build model description dynamically based on model type
+    if config.model.model_type == 'genesis_v2':
+        model_desc = f"GenesisV2 (K={config.model.K}, img_size={config.model.img_size})"
+    elif config.model.model_type == 'slot_attention':
+        model_desc = f"SlotAttention (K={config.model.K}, img_size={config.model.img_size})"
+    else:
+        model_desc = f"{config.model.model_type} (K={config.model.K}, img_size={config.model.img_size})"
+    typer.echo(f"   Model: {model_desc}")
     typer.echo(f"   Training: {config.training.max_steps} steps, batch size {config.training.batch_size}")
     typer.echo(f"   Device: {accelerator.upper()} (precision: {precision})")
     typer.echo(f"   W&B logging: {'Disabled' if disable_wandb else 'Enabled'}")
@@ -429,7 +440,7 @@ def train(
     if compile_model:
         typer.echo(f"🔧 Compiling model for maximum performance...")
         try:
-            # Compile the underlying Genesis V2 model within the Lightning module
+            # Compile the underlying model within the Lightning module
             model.model = torch.compile(model.model, mode="reduce-overhead", backend="inductor", fullgraph=False)
             typer.echo(f"✅ Model compiled successfully (mode=reduce-overhead, backend=inductor, fullgraph=False)")
         except Exception as e:
@@ -495,7 +506,7 @@ def test(
     )
 ):
     """
-    Test Genesis V2 model with a trained checkpoint.
+    Test model (GenesisV2 or SlotAttention) with a trained checkpoint.
     
     Loads configuration and checkpoint, then runs testing.
     """
@@ -568,7 +579,7 @@ def info():
     """
     Display information about the CLI and available commands.
     """
-    typer.echo("🧠 Genesis V2 Training CLI")
+    typer.echo("🧠 Multi-Model Training CLI")
     typer.echo("=" * 50)
     typer.echo("")
     typer.echo("Available commands:")

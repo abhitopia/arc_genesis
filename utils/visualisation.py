@@ -33,7 +33,8 @@ def extract_slot_stats_for_sample(
     sample_idx: int = 0
 ) -> Dict[str, List[torch.Tensor]]:
     """Extract per-slot statistics for a single sample from a batched model output."""
-    K = output['masks_k'].shape[1]
+    # alpha_k is always present in both GenesisV2 and SlotAttention
+    K = output['alpha_k'].shape[1]
 
     slot_stats = {
         'scopes_k': [],
@@ -42,27 +43,28 @@ def extract_slot_stats_for_sample(
         'recon_k': []
     }
 
-    # Ensure all required keys are present
-    required_keys = ['masks_k', 'alpha_k', 'recon_k']
-    if 'scopes_k' in output:
-        required_keys.append('scopes_k')
-        
-    for key in required_keys:
-        if key not in output:
-            raise KeyError(f"Required key '{key}' not found in model output for visualization.")
+    # Check what's available in the output
+    has_masks = 'masks_k' in output  # Only GenesisV2 has separate attention masks
+    has_scopes = 'scopes_k' in output  # Only GenesisV2 has attention scopes
+    has_alpha = 'alpha_k' in output
+    has_recon = 'recon_k' in output
+    
+    if not has_alpha or not has_recon:
+        raise KeyError(f"Required keys 'alpha_k' and 'recon_k' not found in model output.")
 
     for k in range(K):
-        # Scopes: [B, K, H, W] -> (1, H, W)
-        if 'scopes_k' in output:
+        # Scopes: [B, K, H, W] -> (1, H, W) [GenesisV2 only]
+        if has_scopes:
             slot_stats['scopes_k'].append(output['scopes_k'][sample_idx, k:k+1])
         
-        # Attention masks: [B, K, H, W] -> (1, H, W)
-        slot_stats['masks_k'].append(output['masks_k'][sample_idx, k:k+1])
+        # Attention masks: [B, K, H, W] -> (1, H, W) [GenesisV2 only]
+        if has_masks:
+            slot_stats['masks_k'].append(output['masks_k'][sample_idx, k:k+1])
         
-        # Decoder masks: [B, K, H, W] -> (1, H, W)
+        # Decoder masks: [B, K, H, W] -> (1, H, W) [Both models]
         slot_stats['alpha_k'].append(output['alpha_k'][sample_idx, k:k+1])
         
-        # Appearance reconstructions: [B, K, C, H, W] -> (C, H, W)
+        # Appearance reconstructions: [B, K, C, H, W] -> (C, H, W) [Both models]
         slot_stats['recon_k'].append(output['recon_k'][sample_idx, k])
     
     return slot_stats
@@ -84,10 +86,10 @@ def make_slot_figure(
         `(C,H,W)` full reconstruction.
     slot_stats
         Dictionary containing per-slot tensors. Expected keys:
-            - "masks_k"    : list[K] of (1,H,W)   – attention masks (PROBABILITY space)
-            - "alpha_k"    : list[K] of (1,H,W)   – decoder masks (PROBABILITY space)
-            - "recon_k"    : list[K] of (C,H,W)   – appearance reconstructions
-            - "scopes_k"   : (optional) list[K] of (1,H,W) – attention scopes (PROBABILITY space)
+            - "masks_k"    : list[K] of (1,H,W)   – attention masks (PROBABILITY space) [GenesisV2 only]
+            - "alpha_k"    : list[K] of (1,H,W)   – decoder masks (PROBABILITY space) [Both models]
+            - "recon_k"    : list[K] of (C,H,W)   – appearance reconstructions [Both models]
+            - "scopes_k"   : (optional) list[K] of (1,H,W) – attention scopes (PROBABILITY space) [GenesisV2 only]
     max_slots
         Visualise at most this many slots.
     figsize_per_slot
@@ -99,12 +101,30 @@ def make_slot_figure(
         Ready-to-log figure.
     """
     # ------------------------------------------------------------------
-    total_slots = len(slot_stats["masks_k"])
+    # Determine number of slots - use masks_k if available (GenesisV2), else alpha_k (SlotAttention)
+    if slot_stats["masks_k"]:
+        total_slots = len(slot_stats["masks_k"])
+        has_attention_masks = True
+    else:
+        total_slots = len(slot_stats["alpha_k"])
+        has_attention_masks = False
+        
     K = total_slots if max_slots is None else min(max_slots, total_slots)
     
     # Determine number of rows based on available data
     has_scopes = "scopes_k" in slot_stats and slot_stats["scopes_k"]
-    rows = 5 if has_scopes else 4  # (att_mask, scope, dec_mask, recon, masked)
+    
+    # Row calculation:
+    # - Scopes (if available): +1
+    # - Attention masks (if available): +1  
+    # - Decoder masks: +1
+    # - Reconstructions: +1
+    # - Masked reconstructions: +1
+    rows = 3  # decoder mask, recon, masked (always present)
+    if has_scopes:
+        rows += 1
+    if has_attention_masks:
+        rows += 1
     
     # +1 extra column for global images (input/recon)
     cols = K + 1
@@ -127,7 +147,6 @@ def make_slot_figure(
         col = k + 1  # Offset because col-0 is global
         
         # --- Prepare data for current slot ---
-        att_mask = slot_stats["masks_k"][k].squeeze(0)          # (H,W), already in prob space
         dec_mask = slot_stats["alpha_k"][k].squeeze(0) # (H,W), already in prob space
         x_r      = slot_stats["recon_k"][k]                      # (C,H,W)
         masked_recon = x_r * dec_mask.unsqueeze(0)
@@ -135,35 +154,33 @@ def make_slot_figure(
         # --- Plot per-slot data ---
         row_idx = 0
         
-        # Row 0: Attention Scope (if available)
+        # Row 0: Attention Scope (if available - GenesisV2 only)
         if has_scopes:
             scope = slot_stats["scopes_k"][k].squeeze(0) # (H,W), already in prob space
             axes[row_idx, col].imshow(scope.cpu(), cmap="gray", vmin=0, vmax=1)
             axes[row_idx, col].set_title(f"Scope {k}")
             row_idx += 1
         
-        # Row 1: Attention Mask
-        axes[row_idx, col].imshow(att_mask.cpu(), cmap="gray", vmin=0, vmax=1)
-        axes[row_idx, col].set_title(f"Att-mask {k}")
-        row_idx += 1
+        # Row: Attention Mask (if available - GenesisV2 only)
+        if has_attention_masks:
+            att_mask = slot_stats["masks_k"][k].squeeze(0)          # (H,W), already in prob space
+            axes[row_idx, col].imshow(att_mask.cpu(), cmap="gray", vmin=0, vmax=1)
+            axes[row_idx, col].set_title(f"Att-mask {k}")
+            row_idx += 1
         
-        # Row 2: Decoder Mask
+        # Row: Decoder Mask (always present)
         axes[row_idx, col].imshow(dec_mask.cpu(), cmap="gray", vmin=0, vmax=1)
         axes[row_idx, col].set_title(f"Dec-mask {k}")
         row_idx += 1
 
-        # Row 3: Appearance Reconstruction
+        # Row: Appearance Reconstruction
         axes[row_idx, col].imshow(_to_numpy(x_r))
         axes[row_idx, col].set_title(f"Recon {k}")
         row_idx += 1
 
-        # Row 4: Masked Reconstruction
+        # Row: Masked Reconstruction
         axes[row_idx, col].imshow(_to_numpy(masked_recon))
         axes[row_idx, col].set_title(f"Masked {k}")
-        
-        # Hide any remaining rows if scopes are not present
-        for i in range(row_idx, rows):
-            axes[i, col].axis("off")
 
     # --- Final Touches ---
     for ax in axes.ravel():

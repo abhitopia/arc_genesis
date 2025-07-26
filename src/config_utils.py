@@ -40,7 +40,7 @@ def dataclass_to_dict(obj: Any) -> Dict[str, Any]:
 
 def dict_to_dataclass(cls: Type[T], data: Dict[str, Any]) -> T:
     """
-    Convert a dictionary to a dataclass instance.
+    Convert a dictionary to a dataclass instance with support for polymorphic model configs.
     
     Args:
         cls: The dataclass class to instantiate
@@ -52,6 +52,15 @@ def dict_to_dataclass(cls: Type[T], data: Dict[str, Any]) -> T:
     if not is_dataclass(cls):
         return data
     
+    # Special handling for ExperimentConfig with polymorphic model field
+    if cls.__name__ == 'ExperimentConfig' and 'model' in data:
+        model_data = data['model']
+        if isinstance(model_data, dict):
+            # Import here to avoid circular imports
+            from .train import create_model_config_from_dict
+            data = data.copy()  # Don't modify original
+            data['model'] = create_model_config_from_dict(model_data)
+    
     field_types = {f.name: f.type for f in fields(cls)}
     kwargs = {}
     
@@ -59,8 +68,11 @@ def dict_to_dataclass(cls: Type[T], data: Dict[str, Any]) -> T:
         if field_name in data:
             value = data[field_name]
             
+            # Skip model field for ExperimentConfig as it's already handled above
+            if cls.__name__ == 'ExperimentConfig' and field_name == 'model':
+                kwargs[field_name] = value
             # Handle nested dataclasses
-            if is_dataclass(field_type) and isinstance(value, dict):
+            elif is_dataclass(field_type) and isinstance(value, dict):
                 kwargs[field_name] = dict_to_dataclass(field_type, value)
             else:
                 kwargs[field_name] = value
@@ -86,7 +98,7 @@ def save_config_to_yaml(config: Any, filepath: Path) -> None:
 
 def load_config_from_yaml(cls: Type[T], filepath: Path) -> T:
     """
-    Load a configuration dataclass from a YAML file.
+    Load a configuration dataclass from a YAML file with support for polymorphic models.
     
     Args:
         cls: The dataclass class to instantiate

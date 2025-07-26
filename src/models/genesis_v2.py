@@ -11,7 +11,7 @@ from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 @dataclass
 class GenesisV2Config:
-    K_steps: int = 5
+    K: int = 5  # Number of segmentation steps (unified parameter)
     in_chnls: int = 3
     img_size: int = 64
     feat_dim: int = 64
@@ -39,7 +39,7 @@ class GenesisV2(nn.Module):
         self.segmenter = StickBreakingSegmentation(
                             inp_channels=config.feat_dim, 
                             img_size=config.img_size, 
-                            K_steps=config.K_steps,
+                            K_steps=config.K,
                             out_channels=8,
                             kernel=config.kernel)
         
@@ -78,7 +78,7 @@ class GenesisV2(nn.Module):
         x_enc = self.encoder(x) # [B, feat_dim, H, W]
 
         x_seg = self.seg_head(x_enc) # [B, feat_dim, H, W]
-        masks_k, scopes_k = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K_steps, H, W]
+        masks_k, scopes_k = self.segmenter(x_seg, max_steps=max_steps, dynamic=dynamic) # 2x [B, K, H, W]
         
         # Vectorized object feature extraction and latent computation
         z_k, q_z_k = self.compute_latents(x_enc, masks_k)
