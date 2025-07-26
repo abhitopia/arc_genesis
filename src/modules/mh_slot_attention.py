@@ -70,8 +70,8 @@ class MultiHeadSlotAttention(nn.Module):
         b, n, d = inputs.shape
         k = num_slots or self.num_slots
 
-        # Reseed to ensure identical random number generation
-        torch.manual_seed(0)
+        # # Reseed to ensure identical random number generation
+        # torch.manual_seed(0)
 
         # 1 initial slots ϵ~N(0,1)
         mu     = self.slots_mu      .expand(b, k, -1)
@@ -207,8 +207,6 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
         """
         B, N, _ = x.shape
         K = num_slots or self.K
-
-        torch.manual_seed(0)
 
         # initialise slots with learned Gaussian + noise (re‑parameterisation)
         mu = self.mu.expand(B, K, -1)
