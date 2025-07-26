@@ -45,7 +45,7 @@ data:
   is_discrete: false
   seed: 42
 project_name: genesis_v2
-run_name: slot_attention_base
+run_name: slot_attention_broadcast
 save_dir: ./experiments
 log_every_n_steps: 10
 val_check_interval: 500
