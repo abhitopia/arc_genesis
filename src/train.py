@@ -32,6 +32,7 @@ class BaseModelConfig:
     normal_std: float = 0.7        # std for normal distribution for the mixture model
     use_vae: bool = True           # whether to use VAE (stochastic) latents or deterministic latents
     lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
+    num_layers: Optional[int] = 4  # Number of layers in LatentDecoder, None = auto (num upsampling stages)
 
 
 @dataclass

@@ -12,7 +12,7 @@ model:
   slot_dim: 256
   num_heads: 4
   implicit_grads: true
-  broadcast_size: 4
+  broadcast_size: 64
   num_layers: 4
 training:
   batch_size: 128

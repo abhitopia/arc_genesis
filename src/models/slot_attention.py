@@ -28,6 +28,7 @@ class SlotAttentionConfig:
     # VAE config
     use_vae: bool = True
     lstm_hidden_dim: int = 256
+    num_layers: int | None = 4  # Number of layers in LatentDecoder, None = auto (num upsampling stages)
 
 
 class SlotAttentionModel(nn.Module):
@@ -91,6 +92,7 @@ class SlotAttentionModel(nn.Module):
             input_channels=config.feat_dim,
             output_channels=self.in_channels + 1,  # RGB + alpha
             output_size=config.img_size,
+            num_layers=config.num_layers,
             broadcast_size=config.broadcast_size,
             feat_dim=config.feat_dim,
             add_coords_every_layer=config.add_coords_every_layer

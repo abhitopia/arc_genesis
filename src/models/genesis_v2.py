@@ -22,6 +22,7 @@ class GenesisV2Config:
     lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
     detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
     use_vae: bool = True  # whether to use VAE (stochastic) latents or deterministic latents
+    num_layers: int | None = 4  # Number of layers in LatentDecoder, None = auto (num upsampling stages)
 
 class GenesisV2(nn.Module):
     def __init__(self, config: GenesisV2Config):
@@ -61,6 +62,7 @@ class GenesisV2(nn.Module):
             input_channels=config.feat_dim,
             output_channels=self.in_channels + 1, # RGB + alpha
             output_size=config.img_size,
+            num_layers=config.num_layers,
             broadcast_size=config.broadcast_size,
             feat_dim=config.feat_dim,
             add_coords_every_layer=config.add_coords_every_layer)
