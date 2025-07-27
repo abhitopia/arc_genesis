@@ -3,8 +3,8 @@ model:
   K: 5
   in_chnls: 3
   img_size: 64
-  feat_dim: 64
   broadcast_size: 64
+  feat_dim: 128
   add_coords_every_layer: false
   use_position_embed: true
   normal_std: 0.7
@@ -44,7 +44,7 @@ data:
   is_discrete: false
   seed: 42
 project_name: genesis_v2
-run_name: slot_attention_k4_pose
+run_name: slot_attention_k4_pose_128
 save_dir: ./experiments
 log_every_n_steps: 10
 val_check_interval: 500
