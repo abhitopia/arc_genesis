@@ -7,7 +7,7 @@ model:
   broadcast_size: 64
   add_coords_every_layer: false
   normal_std: 0.7
-  use_vae: true
+  use_vae: false
   lstm_hidden_dim: 256
   num_layers: 4
   num_iterations: 5
