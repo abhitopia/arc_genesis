@@ -1,0 +1,55 @@
+model:
+  model_type: slot_attention
+  K: 5
+  in_chnls: 3
+  img_size: 64
+  feat_dim: 64
+  add_coords_every_layer: false
+  normal_std: 0.7
+  use_vae: false
+  lstm_hidden_dim: 256
+  num_iterations: 4
+  slot_dim: 256
+  num_heads: 4
+  implicit_grads: true
+  broadcast_size: 4
+  num_layers: 4
+training:
+  batch_size: 128
+  max_steps: 500000
+  learning_rate: 0.001
+  weight_decay: 0.0
+  use_lr_scheduler: true
+  lr_schedule_patience: 5
+  lr_schedule_factor: 0.5
+  lr_schedule_min_lr: 1.0e-06
+
+  mixture_weight: 0.0
+  mse_weight: 1.0
+
+  latent_kl_weight: 0.0
+  mask_kl_weight: 0.0
+
+  elbo_divergence_threshold: 100000000.0
+
+  use_geco: false
+  geco_goal: 0.5655
+  geco_lr: 1.0e-05
+  geco_alpha: 0.99
+  geco_beta_init: 1.0
+  geco_beta_min: 1.0e-10
+  geco_speedup: 10.0
+data:
+  dataset: d_sprites
+  variable_size: false
+  is_discrete: false
+  seed: 42
+project_name: genesis_v2
+run_name: slot_attention_implicit_no_addcoord
+save_dir: ./experiments
+log_every_n_steps: 10
+val_check_interval: 500
+num_visualizations: 8
+save_top_k: 3
+monitor_metric: loss_val/total_loss
+monitor_mode: min
