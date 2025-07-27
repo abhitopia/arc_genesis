@@ -15,7 +15,7 @@ model:
   num_heads: 4
   slot_dim: 128
   slot_mlp_dim: 128
-  implicit_grads: false
+  implicit_grads: true
 training:
   batch_size: 128
   max_steps: 500000
