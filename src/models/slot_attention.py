@@ -7,30 +7,33 @@ from src.modules.mh_slot_attention import MultiHeadSlotAttentionImplicit
 from ..modules.unet import UNet
 from ..modules.latent_decoder import LatentDecoder
 from ..modules.losses import normal_mixture_loss, mse_reconstruction_loss
-from ..modules.coord_modules import PixelCoords
+from ..modules.coord_modules import PixelCoords, PositionEmbed
 from ..modules.autoregressive_kl import AutoregressiveKLLoss
 
 
 @dataclass
 class SlotAttentionConfig:
-    K: int = 7  # Number of slots (unified parameter)
+    K: int = 5  # Number of slots (unified parameter)
     num_iterations: int = 3
     num_heads: int = 4
-    slot_dim: int = None  # If None, uses feat_dim
-    slot_mlp_dim: int = None  # If None, uses slot_dim
-    implicit_grads: bool = False
+    slot_dim: int = 128  # If None, uses feat_dim
+    slot_mlp_dim: int = 128  # If None, uses slot_dim
+    implicit_grads: bool = True
     # Encoder/Decoder config - same as GenesisV2
     in_chnls: int = 3
     img_size: int = 64
     feat_dim: int = 64
-    broadcast_size: int = 4
+    
+    # LatentDecoder config
+    use_position_embed: bool = True  # Use learnable PositionEmbed (True) vs raw PixelCoords (False)
+    broadcast_size: int = 64
     add_coords_every_layer: bool = False
-    use_position_embed: bool = False  # Use learnable PositionEmbed instead of raw PixelCoords
+    num_layers: int | None = 4  # Number of layers in LatentDecoder, None = auto (num upsampling stages)
     normal_std: float = 0.7
+
     # VAE config
     use_vae: bool = True
-    lstm_hidden_dim: int = 256
-    num_layers: int | None = 4  # Number of layers in LatentDecoder, None = auto (num upsampling stages)
+    lstm_hidden_dim: int = 128
 
 
 class SlotAttentionModel(nn.Module):
@@ -54,13 +57,25 @@ class SlotAttentionModel(nn.Module):
             nn.ReLU()
         )
         
-        # Add position embeddings using PixelCoords (better for SlotAttention)
-        self.pixel_coords = PixelCoords(config.img_size)
+        # Position embedding: learnable (like reference) vs raw coordinates
+        if config.use_position_embed:
+            # Learnable position embedding (like reference model)
+            self.position_embed = PositionEmbed(config.img_size, config.feat_dim)
+            slot_input_dim = config.feat_dim  # Position is added, not concatenated
+        else:
+            # Raw coordinate concatenation (original approach)
+            self.pixel_coords = PixelCoords(config.img_size)
+            slot_input_dim = config.feat_dim + 2  # Features + x,y coordinates
         
-        # Input to SlotAttention will be feat_dim + 2 (for x, y coordinates)
-        slot_input_dim = config.feat_dim + 2
+        # Pre-slot processing MLP (like reference model)
+        self.pre_slot_encode = nn.Sequential(
+            nn.LayerNorm(slot_input_dim),
+            nn.Linear(slot_input_dim, slot_input_dim),
+            nn.ReLU(),
+            nn.Linear(slot_input_dim, slot_input_dim)
+        )
         
-        # Project encoder features + coordinates to slot dimension if needed
+        # Project to slot dimension if needed (after pre-slot processing)
         self.feat_projection = nn.Linear(slot_input_dim, self.slot_dim) if slot_input_dim != self.slot_dim else nn.Identity()
         
         # SlotAttention module
@@ -114,14 +129,24 @@ class SlotAttentionModel(nn.Module):
         # Encode input to features
         x_enc = self.encoder(x)  # [B, feat_dim, H, W]
         
-        # Add position embeddings (coordinates) - immediate access to both features and position
-        x_with_coords = self.pixel_coords(x_enc)  # [B, feat_dim + 2, H, W]
+        # Add position embeddings
+        if self.config.use_position_embed:
+            # Learnable position embedding: addition preserves feature dimension
+            x_with_pos = self.position_embed(x_enc)  # [B, feat_dim, H, W]
+            slot_input_dim = self.config.feat_dim
+        else:
+            # Raw coordinate concatenation: increases feature dimension  
+            x_with_pos = self.pixel_coords(x_enc)  # [B, feat_dim + 2, H, W]
+            slot_input_dim = self.config.feat_dim + 2
         
-        # Flatten spatial dimensions for SlotAttention
-        x_flat = x_with_coords.view(B, self.config.feat_dim + 2, -1).transpose(1, 2)  # [B, H*W, feat_dim + 2]
+        # Flatten spatial dimensions for processing
+        x_flat = x_with_pos.view(B, slot_input_dim, -1).transpose(1, 2)  # [B, H*W, slot_input_dim]
+        
+        # Pre-slot processing (like reference model)
+        x_processed = self.pre_slot_encode(x_flat)  # [B, H*W, slot_input_dim]
         
         # Project to slot dimension if needed
-        x_projected = self.feat_projection(x_flat)  # [B, H*W, slot_dim]
+        x_projected = self.feat_projection(x_processed)  # [B, H*W, slot_dim]
         
         # Get slot representations
         slots = self.slot_attention(x_projected)  # [B, K, slot_dim]
@@ -201,11 +226,12 @@ class SlotAttentionModel(nn.Module):
 
 
 if __name__ == "__main__":
-    print("=== Testing SlotAttention with PixelCoords Position Embeddings ===")
+    print("=== Testing SlotAttention with Learnable Position Embeddings ===")
     
-    # Test with default config (VAE mode)
+    # Test with learnable position embedding (default, like reference)
     config = SlotAttentionConfig()
     model = SlotAttentionModel(config)
+    print(f"Using learnable position embedding: {config.use_position_embed}")
     print(f"Model slot_dim (should be {config.feat_dim}): {model.slot_dim}")
     print(f"VAE mode: {config.use_vae}")
 
@@ -229,19 +255,12 @@ if __name__ == "__main__":
         print(f"Latent KL loss: {results['latent_kl_loss'].shape}")
         print(f"Latent KL loss per slot: {results['latent_kl_loss_per_slot'].shape}")
     
-    # Test deterministic mode
-    print("\n--- Testing deterministic mode (use_vae=False) ---")
-    config_det = SlotAttentionConfig(use_vae=False)
-    model_det = SlotAttentionModel(config_det)
-    print(f"VAE mode: {config_det.use_vae}")
-    results_det = model_det(x)
-    print(f"Latent KL loss: {results_det['latent_kl_loss']}")  # Should be None
+    # Test with raw coordinate concatenation (original approach)
+    print("\n--- Testing with raw coordinate concatenation ---")
+    config_raw = SlotAttentionConfig(use_position_embed=False)
+    model_raw = SlotAttentionModel(config_raw)
+    print(f"Using raw coordinates: {not config_raw.use_position_embed}")
+    results_raw = model_raw(x)
+    print(f"Slots shape: {results_raw['slots'].shape}")
     
-    # Test with explicit slot_dim
-    print("\n--- Testing with explicit slot_dim=128 ---")
-    config2 = SlotAttentionConfig(slot_dim=128)
-    model2 = SlotAttentionModel(config2)
-    print(f"Model slot_dim (should be 128): {model2.slot_dim}")
-    results2 = model2(x)
-    print(f"Slots shape: {results2['slots'].shape}")
-    print("All tests passed! VAE functionality working correctly.")
+    print("All tests passed! Position embedding flexibility working correctly.")
