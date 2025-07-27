@@ -441,8 +441,8 @@ def train(
         typer.echo(f"🔧 Compiling model for maximum performance...")
         try:
             # Compile the underlying model within the Lightning module
-            model.model = torch.compile(model.model, mode="reduce-overhead", backend="inductor", fullgraph=False)
-            typer.echo(f"✅ Model compiled successfully (mode=reduce-overhead, backend=inductor, fullgraph=False)")
+            model.model = torch.compile(model.model, mode="reduce-overhead", backend="inductor", fullgraph=True)
+            typer.echo(f"✅ Model compiled successfully (mode=reduce-overhead, backend=inductor, fullgraph=True)")
         except Exception as e:
             typer.echo(f"⚠️  Model compilation failed: {e}")
             typer.echo(f"   Continuing without compilation...")
