@@ -112,14 +112,15 @@ class TrainingConfig:
     # Training setup
     batch_size: int = 32
     max_steps: int = 10000
-    learning_rate: float = 1e-3
+    learning_rate: float = 4e-4
     weight_decay: float = 0.0
     
-    # Learning rate scheduling
+    # Learning rate scheduling - always uses warmup + cosine decay when enabled
     use_lr_scheduler: bool = True
-    lr_schedule_patience: int = 5  # validation epochs to wait before reducing LR
-    lr_schedule_factor: float = 0.5
-    lr_schedule_min_lr: float = 1e-6
+    warmup_steps: int = 10000      # Number of steps for warm-up phase
+    warmup_start_lr: float = 1e-6 # Starting learning rate for warm-up
+    cosine_decay_steps: Optional[int] = None  # Steps for cosine decay (None = remaining training steps)
+    cosine_min_lr: float = 5e-6   # Minimum learning rate for cosine decay
     
     # Reconstruction loss weights - control sharpness vs probabilistic behavior
     mixture_weight: float = 1.0     # Weight for mixture model loss (probabilistic)
@@ -142,6 +143,23 @@ class TrainingConfig:
     geco_beta_init: float = 1.0 # Initial beta value
     geco_beta_min: float = 1e-10 # Minimum beta value
     geco_speedup: float = 10.0  # Scale GECO lr if constraint violation is positive
+    
+    def __post_init__(self):
+        """Validate scheduler configuration."""
+        if self.use_lr_scheduler:
+            if self.warmup_steps <= 0:
+                raise ValueError(f"warmup_steps must be positive, got {self.warmup_steps}")
+            if self.warmup_steps >= self.max_steps:
+                raise ValueError(f"warmup_steps ({self.warmup_steps}) must be less than max_steps ({self.max_steps})")
+            if self.warmup_start_lr <= 0:
+                raise ValueError(f"warmup_start_lr must be positive, got {self.warmup_start_lr}")
+            if self.cosine_min_lr < 0:
+                raise ValueError(f"cosine_min_lr must be non-negative, got {self.cosine_min_lr}")
+            if self.cosine_decay_steps is not None:
+                if self.cosine_decay_steps <= 0:
+                    raise ValueError(f"cosine_decay_steps must be positive, got {self.cosine_decay_steps}")
+                if self.warmup_steps + self.cosine_decay_steps > self.max_steps:
+                    raise ValueError(f"warmup_steps + cosine_decay_steps ({self.warmup_steps + self.cosine_decay_steps}) cannot exceed max_steps ({self.max_steps})")
 
 
 @dataclass
@@ -320,6 +338,12 @@ class TrainingModule(pl.LightningModule):
             "parameters/geco_beta_init": self.config.training.geco_beta_init,
             "parameters/geco_beta_min": self.config.training.geco_beta_min,
             "parameters/geco_speedup": self.config.training.geco_speedup,
+            # Learning rate scheduler parameters
+            "scheduler/use_lr_scheduler": self.config.training.use_lr_scheduler,
+            "scheduler/warmup_steps": self.config.training.warmup_steps,
+            "scheduler/warmup_start_lr": self.config.training.warmup_start_lr,
+            "scheduler/cosine_decay_steps": self.config.training.cosine_decay_steps,
+            "scheduler/cosine_min_lr": self.config.training.cosine_min_lr,
             "model/img_size": self.config.model.img_size,
             "model/feat_dim": self.config.model.feat_dim,
             "model/normal_std": self.config.model.normal_std,
@@ -532,24 +556,42 @@ class TrainingModule(pl.LightningModule):
         if not self.config.training.use_lr_scheduler:
             return optimizer
         
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        # Create warmup + cosine decay scheduler
+        total_steps = self.config.training.max_steps
+        warmup_steps = self.config.training.warmup_steps
+        cosine_decay_steps = self.config.training.cosine_decay_steps or (total_steps - warmup_steps)
+        
+        # Calculate warmup factor (how much to scale up from start to target LR)
+        warmup_factor = self.config.training.warmup_start_lr / self.config.training.learning_rate
+        
+        # Create warmup scheduler (linear increase from warmup_start_lr to learning_rate)
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            mode='min',
-            factor=self.config.training.lr_schedule_factor,
-            patience=self.config.training.lr_schedule_patience,
-            min_lr=self.config.training.lr_schedule_min_lr
+            start_factor=warmup_factor,
+            end_factor=1.0,
+            total_iters=warmup_steps
+        )
+        
+        # Create cosine decay scheduler (from learning_rate to cosine_min_lr)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cosine_decay_steps,
+            eta_min=self.config.training.cosine_min_lr
+        )
+        
+        # Chain the schedulers together
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps]
         )
         
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": self.config.monitor_metric,  # Monitor validation loss
-                "frequency": 1,  # Check scheduler every validation epoch
-                "interval": "epoch"
-                # Note: With epoch-level monitoring, patience controls validation epochs
-                # Current: patience=5 means wait 5 validation epochs before reducing LR
-                # Since validation runs every 500 training steps, this gives time for improvement
+                "interval": "step",  # Step-based scheduling
+                "frequency": 1,      # Update every step
             }
         }
 
