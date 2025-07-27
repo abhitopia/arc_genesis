@@ -27,9 +27,9 @@ class BaseModelConfig:
     in_chnls: int = 3
     img_size: int = 64
     feat_dim: int = 64
-    broadcast_size: int = 4
+    broadcast_size: int = 64
     add_coords_every_layer: bool = False
-    use_position_embed: bool = False  # Use learnable PositionEmbed instead of raw PixelCoords
+    use_position_embed: bool = True  # Use learnable PositionEmbed instead of raw PixelCoords
     normal_std: float = 0.7        # std for normal distribution for the mixture model
     use_vae: bool = False           # whether to use VAE (stochastic) latents or deterministic latents
     lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
@@ -51,8 +51,8 @@ class SlotAttentionModelConfig(BaseModelConfig):
     # K: int = 7 inherited from base (good default for SlotAttention)
     num_iterations: int = 3
     num_heads: int = 4
-    slot_dim: Optional[int] = None  # If None, uses feat_dim
-    slot_mlp_dim: Optional[int] = None  # If None, uses slot_dim
+    slot_dim: Optional[int] = 128  # If None, uses feat_dim
+    slot_mlp_dim: Optional[int] = 128  # If None, uses slot_dim
     implicit_grads: bool = False
 
 
