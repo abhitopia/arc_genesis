@@ -364,9 +364,10 @@ class TrainingModule(pl.LightningModule):
                 "model/slot_dim": self.config.model.slot_dim,
                 "model/implicit_grads": self.config.model.implicit_grads,
             }
-            # Filter out None values (PyTorch Lightning can't log None)
-            slot_params = {k: v for k, v in slot_params.items() if v is not None}
             static_params.update(slot_params)
+        
+        # Post-init: Filter out None values (PyTorch Lightning can't log None)
+        static_params = {k: v for k, v in static_params.items() if v is not None}
         
         self.log_dict(static_params, on_step=False, on_epoch=True)
         self._logged_static_params = True
