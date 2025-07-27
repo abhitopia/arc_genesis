@@ -110,8 +110,8 @@ class TrainingConfig:
     """Configuration for training parameters."""
     
     # Training setup
-    batch_size: int = 32
-    max_steps: int = 10000
+    batch_size: int = 128
+    max_steps: int = 500000
     learning_rate: float = 4e-4
     weight_decay: float = 0.0
     
@@ -123,18 +123,18 @@ class TrainingConfig:
     cosine_min_lr: float = 5e-6   # Minimum learning rate for cosine decay
     
     # Reconstruction loss weights - control sharpness vs probabilistic behavior
-    mixture_weight: float = 1.0     # Weight for mixture model loss (probabilistic)
-    mse_weight: float = 0.0         # Weight for MSE loss (sharp reconstructions)
+    mixture_weight: float = 0.0     # Weight for mixture model loss (probabilistic)
+    mse_weight: float = 1.0         # Weight for MSE loss (sharp reconstructions)
     
     # Auxiliary loss weights - set to 0 to disable computation
-    latent_kl_weight: float = 1.0   # Weight for latent KL loss (set to 0 to disable VAE)
-    mask_kl_weight: float = 1.0     # Weight for mask KL loss (set to 0 to disable mask consistency)
+    latent_kl_weight: float = 0.0   # Weight for latent KL loss (set to 0 to disable VAE)
+    mask_kl_weight: float = 0.0     # Weight for mask KL loss (set to 0 to disable mask consistency)
   
     # Training stability
     elbo_divergence_threshold: float = 1e8  # Stop training if ELBO exceeds this
       
     # GECO control
-    use_geco: bool = True           # Whether to use GECO for dynamic beta adjustment
+    use_geco: bool = False           # Whether to use GECO for dynamic beta adjustment
     
     # GECO (Generalized ELBO Constrained Optimization) parameters
     geco_goal: float = 0.5655  # Target reconstruction error per pixel

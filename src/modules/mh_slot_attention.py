@@ -186,7 +186,7 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
 
         # 2) attention logits & weights
         dots = (q @ k_feat.transpose(-1, -2)) * self.scale        # [B,H,K,N]
-        attn = dots.softmax(dim=2)                                # softmax over K
+        attn = dots.softmax(dim=-2)                               # softmax over K
         attn = attn / (attn.sum(dim=-1, keepdim=True) + self.eps) # col‑norm
 
         # 3) updates: weighted sum of V over pixels
