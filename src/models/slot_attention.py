@@ -17,6 +17,7 @@ class SlotAttentionConfig:
     num_iterations: int = 3
     num_heads: int = 4
     slot_dim: int = None  # If None, uses feat_dim
+    slot_mlp_dim: int = None  # If None, uses slot_dim
     implicit_grads: bool = False
     # Encoder/Decoder config - same as GenesisV2
     in_chnls: int = 3
@@ -24,6 +25,7 @@ class SlotAttentionConfig:
     feat_dim: int = 64
     broadcast_size: int = 4
     add_coords_every_layer: bool = False
+    use_position_embed: bool = False  # Use learnable PositionEmbed instead of raw PixelCoords
     normal_std: float = 0.7
     # VAE config
     use_vae: bool = True
@@ -40,6 +42,9 @@ class SlotAttentionModel(nn.Module):
         
         # Use feat_dim if slot_dim is None
         self.slot_dim = config.slot_dim if config.slot_dim is not None else config.feat_dim
+        
+        # Use slot_dim if slot_mlp_dim is None
+        self.slot_mlp_dim = config.slot_mlp_dim if config.slot_mlp_dim is not None else self.slot_dim
         
         # Same encoder as GenesisV2
         self.encoder = nn.Sequential(
@@ -64,6 +69,7 @@ class SlotAttentionModel(nn.Module):
             dim=self.slot_dim,
             heads=config.num_heads,
             iters=config.num_iterations,
+            slot_mlp_dim=self.slot_mlp_dim,
             implicit_grads=config.implicit_grads
         )
         
@@ -95,7 +101,8 @@ class SlotAttentionModel(nn.Module):
             num_layers=config.num_layers,
             broadcast_size=config.broadcast_size,
             feat_dim=config.feat_dim,
-            add_coords_every_layer=config.add_coords_every_layer
+            add_coords_every_layer=config.add_coords_every_layer,
+            use_position_embed=config.use_position_embed
         )
 
     def forward(self, x):

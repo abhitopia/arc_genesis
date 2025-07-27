@@ -29,6 +29,7 @@ class BaseModelConfig:
     feat_dim: int = 64
     broadcast_size: int = 4
     add_coords_every_layer: bool = False
+    use_position_embed: bool = False  # Use learnable PositionEmbed instead of raw PixelCoords
     normal_std: float = 0.7        # std for normal distribution for the mixture model
     use_vae: bool = False           # whether to use VAE (stochastic) latents or deterministic latents
     lstm_hidden_dim: int = 256     # hidden dimension for autoregressive KL loss LSTM
@@ -51,6 +52,7 @@ class SlotAttentionModelConfig(BaseModelConfig):
     num_iterations: int = 3
     num_heads: int = 4
     slot_dim: Optional[int] = None  # If None, uses feat_dim
+    slot_mlp_dim: Optional[int] = None  # If None, uses slot_dim
     implicit_grads: bool = False
 
 
@@ -346,6 +348,9 @@ class TrainingModule(pl.LightningModule):
             "scheduler/cosine_min_lr": self.config.training.cosine_min_lr,
             "model/img_size": self.config.model.img_size,
             "model/feat_dim": self.config.model.feat_dim,
+            "model/broadcast_size": self.config.model.broadcast_size,
+            "model/add_coords_every_layer": self.config.model.add_coords_every_layer,
+            "model/use_position_embed": self.config.model.use_position_embed,
             "model/normal_std": self.config.model.normal_std,
             "model/lstm_hidden_dim": self.config.model.lstm_hidden_dim,
             "model/K": self.config.model.K,
@@ -362,6 +367,7 @@ class TrainingModule(pl.LightningModule):
                 "model/num_iterations": self.config.model.num_iterations,
                 "model/num_heads": self.config.model.num_heads,
                 "model/slot_dim": self.config.model.slot_dim,
+                "model/slot_mlp_dim": self.config.model.slot_mlp_dim,
                 "model/implicit_grads": self.config.model.implicit_grads,
             }
             static_params.update(slot_params)

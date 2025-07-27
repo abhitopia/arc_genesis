@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .coord_modules import PixelCoords
+from .coord_modules import PixelCoords, PositionEmbed
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ class LatentDecoder(nn.Module):
     """
     Parameters
     ----------
-    input_channels          : int  - channels of latent input (default = 256)
+    input_channels          : int  - channels of latent input
     output_channels         : int  - channels of final image / logits (default = 4)
     output_size             : int  (power of 2) - desired image size (default = 16)
     num_layers              : int | None - total # of conv blocks (incl. up-sampling
@@ -47,6 +47,7 @@ class LatentDecoder(nn.Module):
     broadcast_size          : int  (power of 2) - side length after the BroadcastLayer (default = 4)
     feat_dim                : int | None - hidden width; default = `input_channels`
     add_coords_every_layer  : bool - True → inject coords at every scale (default = False)
+    use_position_embed      : bool - True → use learnable PositionEmbed instead of raw PixelCoords (default = False)
     """
 
     def __init__(
@@ -58,6 +59,7 @@ class LatentDecoder(nn.Module):
         broadcast_size: int = 4,
         feat_dim: int | None = None,
         add_coords_every_layer: bool = False,
+        use_position_embed: bool = False,
 
     ):
         super().__init__()
@@ -82,11 +84,16 @@ class LatentDecoder(nn.Module):
 
         # import ipdb; ipdb.set_trace()
         # ---- construct network --------------------------------------------
-        layers = [
-            BroadcastLayer(broadcast_size),
-            PixelCoords(broadcast_size)          # ← always once, right after broadcast
-        ]
-        in_c     = input_channels + 2            # +2 for the (x,y) channels
+        layers = [BroadcastLayer(broadcast_size)]
+        
+        # Add coordinate layer - either PixelCoords or PositionEmbed
+        if use_position_embed:
+            layers.append(PositionEmbed(broadcast_size, feat_dim))
+            in_c = input_channels  # PositionEmbed doesn't change channel count
+        else:
+            layers.append(PixelCoords(broadcast_size))
+            in_c = input_channels + 2  # PixelCoords adds +2 channels
+            
         cur_size = broadcast_size
 
         first_conv_block = True                  # will be False after we create one
@@ -95,8 +102,12 @@ class LatentDecoder(nn.Module):
         for i in range(num_ups):
             # add coords **only** from the second conv block onward
             if add_coords_every_layer and not first_conv_block:
-                layers.append(PixelCoords(cur_size))
-                in_c += 2
+                if use_position_embed:
+                    layers.append(PositionEmbed(cur_size, feat_dim))
+                    # PositionEmbed doesn't change channel count
+                else:
+                    layers.append(PixelCoords(cur_size))
+                    in_c += 2  # PixelCoords adds +2 channels
 
             # ConvTranspose2d‑block that doubles H & W
             out_c = feat_dim
@@ -126,8 +137,12 @@ class LatentDecoder(nn.Module):
 
             # same rule: skip the very first conv block (if there was no up‑sampling)
             if add_coords_every_layer and not first_conv_block:
-                layers.append(PixelCoords(cur_size))
-                in_c += 2
+                if use_position_embed:
+                    layers.append(PositionEmbed(cur_size, feat_dim))
+                    # PositionEmbed doesn't change channel count
+                else:
+                    layers.append(PixelCoords(cur_size))
+                    in_c += 2  # PixelCoords adds +2 channels
 
             layers.extend(
                 [
@@ -163,15 +178,29 @@ if __name__ == "__main__":
     # )
     # print(dec16(torch.randn(8, 256)).shape)      # ⇒ torch.Size([8, 4, 16, 16])
 
-    # Example 2: coords every scale
-    dec64 = LatentDecoder(
+    # Example 2: PixelCoords approach
+    dec64_pixel = LatentDecoder(
         broadcast_size=4,
         output_size=64,
         input_channels=128,
         output_channels=3,           # RGB
         feat_dim=192,
         num_layers=8,
-        add_coords_every_layer=True
+        add_coords_every_layer=True,
+        use_position_embed=False     # Use PixelCoords
     )
     x = torch.randn(8, 128)
-    print(dec64(x).shape)                           # ⇒ torch.Size([8, 3, 64, 64])
+    print("PixelCoords:", dec64_pixel(x).shape)     # ⇒ torch.Size([8, 3, 64, 64])
+    
+    # Example 3: PositionEmbed approach  
+    dec64_pos = LatentDecoder(
+        broadcast_size=4,
+        output_size=64,
+        input_channels=128,
+        output_channels=3,           # RGB
+        feat_dim=192,
+        num_layers=8,
+        add_coords_every_layer=True,
+        use_position_embed=True      # Use PositionEmbed
+    )
+    print("PositionEmbed:", dec64_pos(x).shape)     # ⇒ torch.Size([8, 3, 64, 64])

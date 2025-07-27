@@ -18,6 +18,7 @@ class GenesisV2Config:
     kernel: str = 'gaussian'
     broadcast_size: int = 4
     add_coords_every_layer: bool = False
+    use_position_embed: bool = False  # Use learnable PositionEmbed instead of raw PixelCoords
     normal_std: float = 0.7     # std for normal distribution for the mixture model
     lstm_hidden_dim: int = 256    # hidden dimension for autoregressive KL loss LSTM
     detach_recon_masks: bool = True  # whether to detach reconstructed masks in KL loss
@@ -65,7 +66,8 @@ class GenesisV2(nn.Module):
             num_layers=config.num_layers,
             broadcast_size=config.broadcast_size,
             feat_dim=config.feat_dim,
-            add_coords_every_layer=config.add_coords_every_layer)
+            add_coords_every_layer=config.add_coords_every_layer,
+            use_position_embed=config.use_position_embed)
         
         # Autoregressive KL loss module - only when using VAE
         if config.use_vae:

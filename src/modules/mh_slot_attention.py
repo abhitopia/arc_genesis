@@ -14,7 +14,7 @@ class MultiHeadSlotAttention(nn.Module):
                  heads: int = 4,
                  iters: int = 3,
                  eps: float = 1e-8,
-                 hidden_dim: int | None = None # if None, set to dim
+                 slot_mlp_dim: int | None = None # if None, set to dim
                 ):  # 
         super().__init__()
 
@@ -22,7 +22,7 @@ class MultiHeadSlotAttention(nn.Module):
         self.iters = iters
         self.eps = eps
         self.dim = dim
-        self.hidden_dim = hidden_dim or dim 
+        self.slot_mlp_dim = slot_mlp_dim or dim 
 
         assert self.dim % heads == 0, 'dim must be divisible by heads'
         self.dim_head = self.dim // heads
@@ -55,9 +55,9 @@ class MultiHeadSlotAttention(nn.Module):
         self.gru = nn.GRUCell(self.dim, self.dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(self.dim, self.hidden_dim),
+            nn.Linear(self.dim, self.slot_mlp_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.dim)
+            nn.Linear(self.slot_mlp_dim, self.dim)
         )
 
     # -------------------------------------------------------------
@@ -116,7 +116,7 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
         heads (int): number of attention heads H.
         iters (int): number of iterative refinement steps T.
         eps (float): numerical stability term for normalisation.
-        hidden_dim (int | None): hidden width of the slot MLP (defaults to *dim*).
+        slot_mlp_dim (int | None): hidden width of the slot MLP (defaults to *dim*).
         implicit_grads (bool): if *True*, performs **one extra, detached**
             refinement step at the end of the forward pass ("implicit
             differentiation" trick), which tends to stabilise training.
@@ -132,7 +132,7 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
                  heads: int = 4,
                  iters: int = 3,
                  eps: float = 1e-8,
-                 hidden_dim: int | None = None,
+                 slot_mlp_dim: int | None = None,
                  implicit_grads: bool = False):
         super().__init__()
         assert dim % heads == 0, '`dim` must be divisible by `heads`'
@@ -144,7 +144,7 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
         self.d_h = dim // heads
         self.eps = eps
         self.implicit_grads = implicit_grads
-        self.hidden_dim = hidden_dim or dim
+        self.slot_mlp_dim = slot_mlp_dim or dim
 
         self.scale = self.d_h ** -0.5  # correct per‑head √d scaling
 
@@ -170,9 +170,9 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
         # slot update modules
         self.gru = nn.GRUCell(self.D, self.D)
         self.mlp = nn.Sequential(
-            nn.Linear(self.D, self.hidden_dim),
+            nn.Linear(self.D, self.slot_mlp_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.D)
+            nn.Linear(self.slot_mlp_dim, self.D)
         )
 
     # ---------------------------------------------------------------------
