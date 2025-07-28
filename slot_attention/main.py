@@ -119,6 +119,7 @@ def main():
     args = parser.parse_args()
 
     results_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'results/')
+    torch.set_float32_matmul_precision('high')
 
     if not (os.path.exists(results_dir)):
         os.makedirs(results_dir)
