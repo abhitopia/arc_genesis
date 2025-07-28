@@ -18,6 +18,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data.d_sprites import VariableDSpritesConfig
 from model import SlotAttentionModel
 
+def beta_schedule(step, warmup=5000, max_beta=1e-4):
+    """
+    Beta schedule for KL loss weight in VAE training.
+    
+    Args:
+        step: Current training step
+        warmup: Number of steps for linear ramp-up
+        max_beta: Maximum beta value after warmup
+    
+    Returns:
+        Current beta value
+    """
+    if step < warmup:
+        return max_beta * (step / warmup)        # linear ramp
+    return max_beta
+
 class Trainer:
 
     def __init__(self, model, optimizer, device, mask_entropy_weight=1e-4):
@@ -30,10 +46,10 @@ class Trainer:
         self.model.to(self.device)
         self.step =0
 
-    def train_step(self, inputs):
+    def train_step(self, inputs, beta=0.0):
 
         inputs = inputs.to(self.device)
-        recon_combined, recon, masks, slots = self.model(inputs)
+        recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
         recon_loss = self.loss(recon_combined, inputs)
         
         # Compute mask entropy regularization
@@ -41,34 +57,34 @@ class Trainer:
         log_masks = (masks + 1e-8).log()
         mask_entropy = -(masks * log_masks).sum(dim=[2,3,4]).mean()   # average over batch & slots
         
-        # Total loss with entropy regularization
-        loss = recon_loss + self.mask_entropy_weight * mask_entropy
+        # Total loss with entropy regularization and KL loss
+        loss = recon_loss + self.mask_entropy_weight * mask_entropy + beta * kl_loss
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        return loss, recon_loss, mask_entropy
+        return loss, recon_loss, mask_entropy, kl_loss
 
-    def test_step(self, inputs):
+    def test_step(self, inputs, beta=0.0):
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
-            recon_combined, recon, masks, slots = self.model(inputs)
+            recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
             recon_loss = self.loss(recon_combined, inputs)
             
             # Compute mask entropy for logging
             log_masks = (masks + 1e-8).log()
             mask_entropy = -(masks * log_masks).sum(dim=[2,3,4]).mean()
             
-            loss = recon_loss + self.mask_entropy_weight * mask_entropy
-        return loss, recon_loss, mask_entropy
+            loss = recon_loss + self.mask_entropy_weight * mask_entropy + beta * kl_loss
+        return loss, recon_loss, mask_entropy, kl_loss
 
     def visualize(self, inputs):
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
-            recon_combined, recon, masks, slots = self.model(inputs)
+            recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
 
         out = torch.cat(
                 [
@@ -131,6 +147,8 @@ def main():
     parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
     parser.add_argument("--no_encoder_pos_embed", action='store_true', help='disable encoder position embedding')
     parser.add_argument("--no_ordered_slots", action='store_true', help='disable ordered slot initialization (use shared mu/sigma instead)')
+    parser.add_argument("--max_beta", type=float, default=0.0, help='maximum beta for VAE KL loss (default: 0.0, disables VAE)')
+    parser.add_argument("--beta_warmup", type=int, default=5000, help='warmup steps for beta schedule (default: 5000)')
   
     args = parser.parse_args()
 
@@ -189,6 +207,9 @@ def main():
                               shuffle=False,
                               pin_memory=True)
 
+    # Determine if VAE should be used based on max_beta
+    use_vae = args.max_beta > 0.0
+
     model = SlotAttentionModel(
                     resolution=32,  # Single int since image is square
                     num_slots = args.num_slots,
@@ -201,7 +222,8 @@ def main():
                     decoder_num_layers=args.decoder_num_layers,
                     use_encoder_pos_embed=not args.no_encoder_pos_embed,
                     ordered_slots=not args.no_ordered_slots,
-                    implicit_grads = args.use_implicit_grads)
+                    implicit_grads = args.use_implicit_grads,
+                    use_vae = use_vae)
     
     # Compile model if requested and available
     if args.compile:
@@ -245,13 +267,18 @@ def main():
 
                 trainer.optimizer.param_groups[0]['lr'] = learning_rate
 
-                loss, recon_loss, mask_entropy = trainer.train_step(batch['imgs'])
+                # Compute current beta for VAE
+                current_beta = beta_schedule(step, warmup=args.beta_warmup, max_beta=args.max_beta)
+
+                loss, recon_loss, mask_entropy, kl_loss = trainer.train_step(batch['imgs'], beta=current_beta)
 
                 if step % args.log_interval == 0:
                     # Log training metrics
                     writer.add_scalar('train_loss', loss.item(), step)
                     writer.add_scalar('train_recon_loss', recon_loss.item(), step)
                     writer.add_scalar('train_mask_entropy', mask_entropy.item(), step)
+                    writer.add_scalar('train_kl_loss', kl_loss.item(), step)
+                    writer.add_scalar('beta', current_beta, step)
                     
                     trainer.model.eval()
                     sample_imgs = trainer.visualize(fixed_imgs)
@@ -262,20 +289,24 @@ def main():
                     total_loss = 0
                     total_recon_loss = 0
                     total_mask_entropy = 0
+                    total_kl_loss = 0
                     for batch in test_loader:
-                        test_loss, test_recon_loss, test_mask_entropy = trainer.test_step(batch['imgs'])
+                        test_loss, test_recon_loss, test_mask_entropy, test_kl_loss = trainer.test_step(batch['imgs'], beta=current_beta)
                         total_loss += test_loss.item()
                         total_recon_loss += test_recon_loss.item()
                         total_mask_entropy += test_mask_entropy.item()
+                        total_kl_loss += test_kl_loss.item()
                     
                     avg_test_loss = total_loss / len(test_loader)
                     avg_test_recon_loss = total_recon_loss / len(test_loader)
                     avg_test_mask_entropy = total_mask_entropy / len(test_loader)
+                    avg_test_kl_loss = total_kl_loss / len(test_loader)
 
                     # Log test metrics
                     writer.add_scalar('test_loss', avg_test_loss, step)
                     writer.add_scalar('test_recon_loss', avg_test_recon_loss, step)
                     writer.add_scalar('test_mask_entropy', avg_test_mask_entropy, step)
+                    writer.add_scalar('test_kl_loss', avg_test_kl_loss, step)
 
                     print("###############################")
                     print(f"At training step {step}")
@@ -283,9 +314,12 @@ def main():
                     print(f"Train_loss: {loss.item():.6f}")
                     print(f"  └─ Recon: {recon_loss.item():.6f}")
                     print(f"  └─ Entropy: {mask_entropy.item():.6f} (λ*H: {(trainer.mask_entropy_weight * mask_entropy).item():.6f})")
+                    print(f"  └─ KL: {kl_loss.item():.6f} (β*KL: {(current_beta * kl_loss).item():.6f})")
                     print(f"Test_loss: {avg_test_loss:.6f}")
                     print(f"  └─ Recon: {avg_test_recon_loss:.6f}")
                     print(f"  └─ Entropy: {avg_test_mask_entropy:.6f} (λ*H: {(trainer.mask_entropy_weight * avg_test_mask_entropy):.6f})")
+                    print(f"  └─ KL: {avg_test_kl_loss:.6f} (β*KL: {(current_beta * avg_test_kl_loss):.6f})")
+                    print(f"Beta: {current_beta:.6f}")
 
                     time_since_start = time.time() - start_time
                     print(f"Time Since Start {time_since_start:.6f}")
@@ -299,20 +333,26 @@ def main():
     if args.test:
         print("Testing")
         trainer.model.eval()
+        current_beta = beta_schedule(trainer.step, warmup=args.beta_warmup, max_beta=args.max_beta)
         total_loss = 0
         total_recon_loss = 0
         total_mask_entropy = 0
+        total_kl_loss = 0
         for batch in test_loader:
-            loss, recon_loss, mask_entropy = trainer.test_step(batch['imgs'])
+            loss, recon_loss, mask_entropy, kl_loss = trainer.test_step(batch['imgs'], beta=current_beta)
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_mask_entropy += mask_entropy.item()
+            total_kl_loss += kl_loss.item()
         avg_test_loss = total_loss / len(test_loader)
         avg_test_recon_loss = total_recon_loss / len(test_loader)
         avg_test_mask_entropy = total_mask_entropy / len(test_loader)
+        avg_test_kl_loss = total_kl_loss / len(test_loader)
         print(f"Val_loss: {avg_test_loss:.6f}")
         print(f"  └─ Recon: {avg_test_recon_loss:.6f}")
         print(f"  └─ Entropy: {avg_test_mask_entropy:.6f} (λ*H: {(trainer.mask_entropy_weight * avg_test_mask_entropy):.6f})")
+        print(f"  └─ KL: {avg_test_kl_loss:.6f} (β*KL: {(current_beta * avg_test_kl_loss):.6f})")
+        print(f"Beta: {current_beta:.6f}")
 
     if args.visualize:
         print("Visualize Slots")

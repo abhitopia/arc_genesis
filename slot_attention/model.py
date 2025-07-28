@@ -48,7 +48,7 @@ class SlotAttention(nn.Module):
             # Systematically space slots from -1 to +1 in latent space
             init_range = torch.linspace(-1, 1, self.num_slots).unsqueeze(-1)  # K×1
             self.slots_mu = nn.Parameter(init_range.repeat(1, self.slot_size).unsqueeze(0))  # (1,K,D)
-            self.slots_logsigma = nn.Parameter(torch.full((1, num_slots, slot_size), -1.0)) # (1,K,D)
+            self.slots_logsigma = nn.Parameter(torch.full((1, self.num_slots, self.slot_size), -1.0)) # (1,K,D)
             # softplus(-1) ≈ 0.3 stdev
 
         else:
@@ -94,8 +94,9 @@ class SlotAttention(nn.Module):
             # Original: repeat shared parameters along both batch and slot dimensions
             mu = self.slots_mu.repeat(batch_size, self.num_slots, 1)
             logsigma = self.slots_logsigma.repeat(batch_size, self.num_slots, 1)
-        logsigma = F.softplus(logsigma) + 1e-5
-        slots_dist = dist.independent.Independent(dist.Normal(loc=mu, scale=logsigma), 1)
+        
+        sigma = F.softplus(logsigma) + 1e-5
+        slots_dist = dist.independent.Independent(dist.Normal(loc=mu, scale=sigma), 1)
         slots = slots_dist.rsample()
 
         for _ in range(self.num_iters):
@@ -120,7 +121,8 @@ class SlotAttentionModel(nn.Module):
            decoder_num_layers = 6,
            use_encoder_pos_embed = True,
            ordered_slots = True,
-           implicit_grads = False):
+           implicit_grads = False,
+           use_vae = False):
 
         super().__init__()
 
@@ -133,6 +135,7 @@ class SlotAttentionModel(nn.Module):
         self.base_ch = base_ch
         self.use_encoder_pos_embed = use_encoder_pos_embed
         self.ordered_slots = ordered_slots
+        self.use_vae = use_vae
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -170,16 +173,25 @@ class SlotAttentionModel(nn.Module):
                             implicit_grads=implicit_grads,
                             ordered_slots=self.ordered_slots)
 
+        # VAE components for slot regularization
+        if self.use_vae:
+            # Small MLP to jointly learn mu and logvar
+            self.vae_mlp = nn.Sequential(
+                nn.Linear(self.slot_size, 2*self.slot_size),
+                nn.ReLU(),
+                nn.Linear(2*self.slot_size, 2 * self.slot_size)
+            )
+
         # 4) latent decoder – broadcast starts at **bottleneck_hw**
         self.decoder = LatentDecoder(
-                           input_channels  = self.slot_size,
+                           input_channels  = self.slot_size,             # Use slot_size directly
                            output_channels = 4,                   # RGB+mask
                            output_size     = self.resolution,
                            broadcast_size  = 4,
                            num_layers      = self.decoder_num_layers,
                            add_coords_every_layer=False,
                            use_position_embed=True,
-                           feat_dim        = self.base_ch)
+                           feat_dim        = self.slot_size)            # Use slot_size for consistency
 
 
     def forward(self, imgs):
@@ -197,6 +209,15 @@ class SlotAttentionModel(nn.Module):
         feats = self.linear_pre_sa(self.norm_pre_sa(feats))
 
         slots = self.slot_attention(feats)                      # B, K, D
+        
+        # ----- KL regularizer (VAE) --------------------------------------
+        kl_loss = torch.tensor(0.0, device=slots.device)
+        if self.use_vae:
+            vae_output = self.vae_mlp(slots)                    # B, K, 2*D
+            mu_post, logvar = torch.chunk(vae_output, 2, dim=-1)  # B, K, D each
+            # KL divergence from N(0,I) prior: -0.5 * sum(1 + log(σ²) - μ² - σ²)
+            kl_loss = -0.5 * (1 + logvar - mu_post.pow(2) - logvar.exp()).mean()
+        
         # ----- decode ----------------------------------------------------
         dec = self.decoder(slots.reshape(-1, slots.size(-1)))
         dec = dec.view(B, self.num_slots, 4, *dec.shape[-2:])
@@ -223,7 +244,7 @@ class SlotAttentionModel(nn.Module):
         
         recon_combined = (recon * masks).sum(dim=1)
 
-        return recon_combined, recon, masks, slots
+        return recon_combined, recon, masks, slots, kl_loss
 
 class PositionEmbed(nn.Module):
 
