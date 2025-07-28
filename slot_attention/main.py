@@ -116,6 +116,7 @@ def main():
     parser.add_argument("--restore_path", type=str, help='checkpoint path to restore')
     parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
     parser.add_argument("--use_latent_decoder", action='store_true', help='use LatentDecoder instead of original decoder')
+    parser.add_argument("--decoder_num_layers", type=int, default=6, help='number of layers in LatentDecoder (default: 6)')
   
     args = parser.parse_args()
 
@@ -186,6 +187,7 @@ def main():
                     slot_mlp_size = 128,
                     decoder_resolution=(32, 32),
                     use_latent_decoder=args.use_latent_decoder,
+                    decoder_num_layers=args.decoder_num_layers,
                     implicit_grads = args.use_implicit_grads)
     
     # Compile model if requested and available

@@ -101,6 +101,7 @@ class SlotAttentionModel(nn.Module):
            slot_mlp_size = 128,
            decoder_resolution=(32, 32),
            use_latent_decoder = False,
+           decoder_num_layers = 6,
            implicit_grads = False):
 
         super().__init__()
@@ -111,6 +112,7 @@ class SlotAttentionModel(nn.Module):
         self.num_slots = num_slots
         self.decoder_resolution = decoder_resolution
         self.use_latent_decoder = use_latent_decoder
+        self.decoder_num_layers = decoder_num_layers
 
         modules = []
         in_dim = self.in_channels
@@ -148,6 +150,7 @@ class SlotAttentionModel(nn.Module):
                 input_channels=hdim,  # Use hdim instead of slot_size
                 output_channels=4,  # RGB + mask
                 output_size=self.decoder_resolution[0],  # 32x32
+                num_layers=self.decoder_num_layers,
                 broadcast_size=4,
                 feat_dim=hdim,
                 add_coords_every_layer=False,
