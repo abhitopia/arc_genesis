@@ -117,6 +117,8 @@ def main():
     parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
     parser.add_argument("--use_latent_decoder", action='store_true', help='use LatentDecoder instead of original decoder')
     parser.add_argument("--decoder_num_layers", type=int, default=6, help='number of layers in LatentDecoder (default: 6)')
+    parser.add_argument("--base_ch", type=int, default=32, help='base channels for encoder (default: 32)')
+    parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
   
     args = parser.parse_args()
 
@@ -176,17 +178,14 @@ def main():
                               pin_memory=True)
 
     model = SlotAttentionModel(
-                    resolution=(32, 32),
+                    resolution=32,  # Single int since image is square
                     num_slots = args.num_slots,
                     num_iters = args.num_slot_iters,
-                    device= device,
                     in_channels =3,
-                    num_hidden = 4,
-                    hdim = 64,
-                    slot_size = 64,
-                    slot_mlp_size = 128,
-                    decoder_resolution=(32, 32),
-                    use_latent_decoder=args.use_latent_decoder,
+                    base_ch = args.base_ch,  # Now configurable
+                    bottleneck_hw = args.bottleneck_hw,  # Now configurable
+                    slot_size = args.base_ch,
+                    slot_mlp_size = 2 * args.base_ch,
                     decoder_num_layers=args.decoder_num_layers,
                     implicit_grads = args.use_implicit_grads)
     
