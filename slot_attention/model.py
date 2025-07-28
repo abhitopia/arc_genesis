@@ -100,7 +100,6 @@ class SlotAttentionModel(nn.Module):
            bottleneck_hw = 8,
            slot_size = 64,
            slot_mlp_size = 128,
-           use_latent_decoder = False,
            decoder_num_layers = 6,
            implicit_grads = False):
 
@@ -111,18 +110,8 @@ class SlotAttentionModel(nn.Module):
         self.in_channels = in_channels
         self.slot_size = slot_size
         self.num_slots = num_slots
-        self.use_latent_decoder = use_latent_decoder
         self.decoder_num_layers = decoder_num_layers
         self.base_ch = base_ch
-
-        # modules = []
-        # in_dim = self.in_channels
-        # for _ in range(num_hidden):
-        #     modules.append(nn.Conv2d(in_dim, hdim, kernel_size=5, stride=1, padding=5//2))
-        #     modules.append(nn.ReLU())
-        #     in_dim = hdim
-
-        # self.encoder = nn.Sequential(*modules)
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -156,15 +145,6 @@ class SlotAttentionModel(nn.Module):
                             mlp_hdim    = slot_mlp_size,
                             implicit_grads=implicit_grads)
 
-        # self.slot_attention = SlotAttention(
-        #                         in_dim = hdim,
-        #                         slot_size=self.slot_size,
-        #                         num_slots=self.num_slots,
-        #                         num_iters=num_iters,
-        #                         mlp_hdim =slot_mlp_size,
-        #                         implicit_grads = implicit_grads
-        #                       )
-
         # 4) latent decoder – broadcast starts at **bottleneck_hw**
         self.decoder = LatentDecoder(
                            input_channels  = self.slot_size,
@@ -175,78 +155,7 @@ class SlotAttentionModel(nn.Module):
                            add_coords_every_layer=False,
                            use_position_embed=True,
                            feat_dim        = self.base_ch)
-        
-        # # Choose decoder type
-        # if self.use_latent_decoder:
-        #     # Add projection layer to convert from slot_size to feat_dim
-        #     self.slot_projection = nn.Linear(slot_size, hdim)
-            
-        #     # Use LatentDecoder with 4x4 broadcast size and 32x32 output
-        #     self.decoder = LatentDecoder(
-        #         input_channels=hdim,  # Use hdim instead of slot_size
-        #         output_channels=4,  # RGB + mask
-        #         output_size=self.decoder_resolution[0],  # 32x32
-        #         num_layers=self.decoder_num_layers,
-        #         broadcast_size=4,
-        #         feat_dim=hdim,
-        #         add_coords_every_layer=False,
-        #         use_position_embed=True
-        #     )
-        #     self.decoder_pos_embed = None  # LatentDecoder handles position encoding internally
-        # else:
-        #     # Use original decoder with position embedding
-        #     self.decoder_pos_embed = PositionEmbed(slot_size, self.decoder_resolution, device)
-        #     self.slot_projection = None  # Not used with original decoder
-            
-        #     modules = []
-        #     in_dim = slot_size
-        #     for _ in range(num_hidden-1):
-        #         modules.append(nn.ConvTranspose2d(in_dim, hdim, kernel_size=5, stride=1, padding=5//2))
-        #         modules.append(nn.ReLU())
-        #         in_dim = hdim
 
-        #     modules.append(nn.ConvTranspose2d(32, 4, kernel_size=3, stride=1, padding=3//2))
-        #     self.decoder = nn.Sequential(*modules)
-
-    # def forward(self, x):
-
-    #     batch_size, num_channels, height, width = x.shape
-
-    #     x = self.encoder(x) 
-    #     x = x.permute(0, 2, 3, 1).contiguous()
-    #     x = self.encoder_pos_embed(x) #shape:[batch_size, height, width, hdim]
-
-    #     x = torch.flatten(x, start_dim=1, end_dim=2) #shape:[batch_size, height*width, hdim]
-
-    #     x = self.norm_layer(x) 
-    #     x = self.pre_slot_encode(x) 
-
-    #     slots = self.slot_attention(x) #shape:[batch_size, num_slots, slot_size]
-
-    #     if self.use_latent_decoder:
-    #         # LatentDecoder expects 2D input: [batch_size*num_slots, hdim]
-    #         x = slots.reshape(-1, self.slot_size)
-    #         x = self.slot_projection(x)  # Project from slot_size to hdim
-    #         x = self.decoder(x)
-    #         #x has shape:[batch_size*num_slots, num_channels+1, height, width]
-    #     else:
-    #         # Original decoder with position embedding
-    #         x = slots.reshape(-1,1,1, self.slot_size).repeat(1, *self.decoder_resolution, 1)
-    #         # x has shape: [batch_size*num_slots, decoder_res[0], decoder_res[1], slot_size]
-
-    #         x = self.decoder_pos_embed(x)
-    #         x = x.permute(0, 3, 1, 2).contiguous()
-    #         x = self.decoder(x) 
-    #         #x has shape:[batch_size*num_slots, num_channels+1, height, width]
-
-    #     x = x.reshape(-1, self.num_slots, num_channels+1, height, width)
-
-    #     recon, masks = x.split((3, 1), dim=2)
-    #     masks = F.softmax(masks, dim=1)
-    #     recon_combined = (recon * masks).sum(dim=1)
-
-    #     return recon_combined, recon, masks, slots
-    
 
     def forward(self, imgs):
         B = imgs.size(0)

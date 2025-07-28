@@ -7,10 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import datasets, transforms
 from torchvision.utils import save_image, make_grid
 
 from data import DSpritesDataset
@@ -111,9 +109,6 @@ def main():
     parser.add_argument("--visualize", action='store_true')
     parser.add_argument("--use_implicit_grads", action='store_true')
     parser.add_argument("--n_samples", type=int, default=8, help='number of sample imgs to visualize')
-    parser.add_argument("--data_path",  type=str, default='Tetrominoes')
-    parser.add_argument("--train_h5_path", type=str, default='tetrominoes.h5')
-    parser.add_argument("--test_h5_path", type=str, default='tetrominoes_test.h5')
     parser.add_argument("--exp_name", type=str, default='slot_attention', help='name of experiment')
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_slots", type=int, default=5)
@@ -130,7 +125,6 @@ def main():
     parser.add_argument("--restore", action='store_true')
     parser.add_argument("--restore_path", type=str, help='checkpoint path to restore')
     parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
-    parser.add_argument("--use_latent_decoder", action='store_true', help='use LatentDecoder instead of original decoder')
     parser.add_argument("--decoder_num_layers", type=int, default=6, help='number of layers in LatentDecoder (default: 6)')
     parser.add_argument("--base_ch", type=int, default=32, help='base channels for encoder (default: 32)')
     parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
