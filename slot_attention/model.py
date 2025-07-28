@@ -120,7 +120,7 @@ class SlotAttentionModel(nn.Module):
                                          base_ch=self.base_ch,
                                          image_hw=self.resolution,
                                          bottleneck_hw=self.bottleneck_hw,
-                                         num_conv_per_res=1)
+                                         num_conv_per_res=2)
         
          # 2) position embedding that matches the encoder grid (optional)
         if self.use_encoder_pos_embed:
@@ -155,7 +155,7 @@ class SlotAttentionModel(nn.Module):
                            input_channels  = self.slot_size,
                            output_channels = 4,                   # RGB+mask
                            output_size     = self.resolution,
-                           broadcast_size  = self.bottleneck_hw,
+                           broadcast_size  = 4,
                            num_layers      = self.decoder_num_layers,
                            add_coords_every_layer=False,
                            use_position_embed=True,

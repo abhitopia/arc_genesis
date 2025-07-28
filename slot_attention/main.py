@@ -125,7 +125,7 @@ def main():
     parser.add_argument("--restore", action='store_true')
     parser.add_argument("--restore_path", type=str, help='checkpoint path to restore')
     parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
-    parser.add_argument("--decoder_num_layers", type=int, default=6, help='number of layers in LatentDecoder (default: 6)')
+    parser.add_argument("--decoder_num_layers", type=int, default=7, help='number of layers in LatentDecoder (default: 6)')
     parser.add_argument("--base_ch", type=int, default=64, help='base channels for encoder (default: 32)')
     parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
     parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
