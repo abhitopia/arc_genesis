@@ -22,12 +22,13 @@ from model import SlotAttentionModel
 
 class Trainer:
 
-    def __init__(self, model, optimizer, device):
+    def __init__(self, model, optimizer, device, mask_entropy_weight=1e-4):
 
         self.model  = model
         self.optimizer = optimizer
         self.loss = nn.MSELoss()
         self.device = device
+        self.mask_entropy_weight = mask_entropy_weight
         self.model.to(self.device)
         self.step =0
 
@@ -35,21 +36,35 @@ class Trainer:
 
         inputs = inputs.to(self.device)
         recon_combined, recon, masks, slots = self.model(inputs)
-        loss = self.loss(recon_combined, inputs)
+        recon_loss = self.loss(recon_combined, inputs)
+        
+        # Compute mask entropy regularization
+        # masks shape: (B, K, 1, H, W)
+        log_masks = (masks + 1e-8).log()
+        mask_entropy = -(masks * log_masks).sum(dim=[2,3,4]).mean()   # average over batch & slots
+        
+        # Total loss with entropy regularization
+        loss = recon_loss + self.mask_entropy_weight * mask_entropy
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        return loss
+        return loss, recon_loss, mask_entropy
 
     def test_step(self, inputs):
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
             recon_combined, recon, masks, slots = self.model(inputs)
-            loss = self.loss(recon_combined, inputs)
-        return loss
+            recon_loss = self.loss(recon_combined, inputs)
+            
+            # Compute mask entropy for logging
+            log_masks = (masks + 1e-8).log()
+            mask_entropy = -(masks * log_masks).sum(dim=[2,3,4]).mean()
+            
+            loss = recon_loss + self.mask_entropy_weight * mask_entropy
+        return loss, recon_loss, mask_entropy
 
     def visualize(self, inputs):
 
@@ -119,6 +134,7 @@ def main():
     parser.add_argument("--decoder_num_layers", type=int, default=6, help='number of layers in LatentDecoder (default: 6)')
     parser.add_argument("--base_ch", type=int, default=32, help='base channels for encoder (default: 32)')
     parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
+    parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
   
     args = parser.parse_args()
 
@@ -199,7 +215,7 @@ def main():
     
     optimizer = optim.Adam(model.parameters(), lr = args.learning_rate)
 
-    trainer = Trainer(model, optimizer, device)
+    trainer = Trainer(model, optimizer, device, mask_entropy_weight=args.mask_entropy_weight)
     writer = SummaryWriter(logdir)
 
     perm = torch.randperm(args.batch_size)
@@ -231,28 +247,47 @@ def main():
 
                 trainer.optimizer.param_groups[0]['lr'] = learning_rate
 
-                loss = trainer.train_step(batch['imgs'])
+                loss, recon_loss, mask_entropy = trainer.train_step(batch['imgs'])
 
                 if step % args.log_interval == 0:
+                    # Log training metrics
                     writer.add_scalar('train_loss', loss.item(), step)
+                    writer.add_scalar('train_recon_loss', recon_loss.item(), step)
+                    writer.add_scalar('train_mask_entropy', mask_entropy.item(), step)
+                    
                     trainer.model.eval()
                     sample_imgs = trainer.visualize(fixed_imgs)
                     writer.add_image(f'slots at epoch {step}', sample_imgs, step)
                     save_image(sample_imgs, os.path.join(logdir, f'slots_at_{step}.jpg'))
 
+                    # Compute test metrics
                     total_loss = 0
+                    total_recon_loss = 0
+                    total_mask_entropy = 0
                     for batch in test_loader:
-                        loss = trainer.test_step(batch['imgs'])
-                        total_loss += loss.item()
-                    test_loss = total_loss/len(test_loader)
+                        test_loss, test_recon_loss, test_mask_entropy = trainer.test_step(batch['imgs'])
+                        total_loss += test_loss.item()
+                        total_recon_loss += test_recon_loss.item()
+                        total_mask_entropy += test_mask_entropy.item()
+                    
+                    avg_test_loss = total_loss / len(test_loader)
+                    avg_test_recon_loss = total_recon_loss / len(test_loader)
+                    avg_test_mask_entropy = total_mask_entropy / len(test_loader)
 
-                    writer.add_scalar('test_loss',test_loss, step)
+                    # Log test metrics
+                    writer.add_scalar('test_loss', avg_test_loss, step)
+                    writer.add_scalar('test_recon_loss', avg_test_recon_loss, step)
+                    writer.add_scalar('test_mask_entropy', avg_test_mask_entropy, step)
 
                     print("###############################")
                     print(f"At training step {step}")
                     print("###############################")
                     print(f"Train_loss: {loss.item():.6f}")
-                    print(f"test_loss: {test_loss:.6f}")   
+                    print(f"  └─ Recon: {recon_loss.item():.6f}")
+                    print(f"  └─ Entropy: {mask_entropy.item():.6f} (λ*H: {(trainer.mask_entropy_weight * mask_entropy).item():.6f})")
+                    print(f"Test_loss: {avg_test_loss:.6f}")
+                    print(f"  └─ Recon: {avg_test_recon_loss:.6f}")
+                    print(f"  └─ Entropy: {avg_test_mask_entropy:.6f} (λ*H: {(trainer.mask_entropy_weight * avg_test_mask_entropy):.6f})")
 
                     time_since_start = time.time() - start_time
                     print(f"Time Since Start {time_since_start:.6f}")
@@ -267,11 +302,19 @@ def main():
         print("Testing")
         trainer.model.eval()
         total_loss = 0
+        total_recon_loss = 0
+        total_mask_entropy = 0
         for batch in test_loader:
-            loss = trainer.test_step(batch['imgs'])
+            loss, recon_loss, mask_entropy = trainer.test_step(batch['imgs'])
             total_loss += loss.item()
-        test_loss = total_loss/len(test_loader)
-        print(f"Val_loss: {test_loss:.6f}")
+            total_recon_loss += recon_loss.item()
+            total_mask_entropy += mask_entropy.item()
+        avg_test_loss = total_loss / len(test_loader)
+        avg_test_recon_loss = total_recon_loss / len(test_loader)
+        avg_test_mask_entropy = total_mask_entropy / len(test_loader)
+        print(f"Val_loss: {avg_test_loss:.6f}")
+        print(f"  └─ Recon: {avg_test_recon_loss:.6f}")
+        print(f"  └─ Entropy: {avg_test_mask_entropy:.6f} (λ*H: {(trainer.mask_entropy_weight * avg_test_mask_entropy):.6f})")
 
     if args.visualize:
         print("Visualize Slots")
