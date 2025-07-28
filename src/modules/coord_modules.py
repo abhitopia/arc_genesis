@@ -25,9 +25,11 @@ class PositionEmbed(nn.Module):
     Learnable positional embedding that adds coordinate-based features to input.
     Same interface as PixelCoords but adds instead of concatenating.
     """
-    def __init__(self, im_dim, feat_dim):
+    def __init__(self, im_dim, feat_dim, init_scale=0.02):
         super().__init__()
         self.dense = nn.Linear(4, feat_dim)
+        nn.init.uniform_(self.dense.weight, -init_scale, init_scale)  # shrink
+        nn.init.constant_(self.dense.bias, 0.0)
         self.feat_dim = feat_dim
         
         grid = self._build_grid(im_dim)
