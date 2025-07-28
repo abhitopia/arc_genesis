@@ -205,18 +205,18 @@ class SlotAttentionModel(nn.Module):
         
         # Choose normalization based on ordered_slots setting
         if self.ordered_slots:
-            # Stick-breaking normalization for ordered slots
-            prob = torch.sigmoid(mask_logits)  # (B, K, 1, H, W)
-            
-            # Compute cumulative product of (1 - prob)
-            cumprod = torch.cumprod(1 - prob + 1e-6, dim=1)  # (B, K, 1, H, W)
-            
-            # Prepend a "1" so cumprod_{<k} is 1 for k=0
-            ones = torch.ones_like(prob[:, :1])  # (B, 1, 1, H, W)
-            cumprod = torch.cat([ones, cumprod[:, :-1]], dim=1)  # (B, K, 1, H, W)
-            
-            # Stick-breaking: each slot gets prob[k] * prod_{j<k}(1-prob[j])
-            masks = prob * cumprod  # (B, K, 1, H, W)
+            # Stable stick-breaking normalization using log-space computation
+            log_sig  = F.logsigmoid(mask_logits)        # log σ(z_k)
+            log_1sig = F.logsigmoid(-mask_logits)       # log (1‑σ(z_k))
+
+            # log cumulative sum of the 'remaining stick'
+            # cum_log = [0, log(1‑σ(z0)), log(1‑σ(z0))+log(1‑σ(z1)), …]
+            cum_log  = torch.cumsum(log_1sig, dim=1)
+            cum_log  = torch.cat([torch.zeros_like(cum_log[:, :1]),   # prepend 0 for k=0
+                                  cum_log[:, :-1]], dim=1)
+
+            log_masks = log_sig + cum_log          # log m_k = log σ + Σ_{<k} log(1‑σ)
+            masks     = torch.exp(log_masks)       # back to probability space
         else:
             # Standard softmax normalization for unordered slots
             masks = torch.softmax(mask_logits, dim=1)
