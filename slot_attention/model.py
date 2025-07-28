@@ -10,7 +10,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.modules.latent_decoder import LatentDecoder
 
-from encoder import DownsampleEncoder
+from slot_attention.encoder import DownsampleEncoder
 
 
 class SlotAttention(nn.Module):
@@ -161,6 +161,7 @@ class SlotAttentionModel(nn.Module):
         B = imgs.size(0)
 
         feats = self.encoder(imgs)                              # B,C,h,w
+        # print("ENCODER OUT SHAPE:", feats.shape) # expect (B, C, 8, 8)
         feats = feats.permute(0, 2, 3, 1)                       # B,h,w,C
         feats = self.enc_pos_emb(feats).view(B, -1, feats.size(-1))
         feats = self.linear_pre_sa(self.norm_pre_sa(feats))
@@ -197,3 +198,12 @@ def build_grid(resolution):
     grid = grid.unsqueeze(0)
     grid = torch.cat([grid, 1.0-grid], dim=-1)
     return grid
+
+
+if __name__ == "__main__":
+    from pprint import pprint
+    g = build_grid((8, 8))            # use the bottleneck resolution here
+    print("grid[:, :, 0] (y‑coord) first row: ", g[0, 0, :, 0].tolist())
+    print("grid[:, :, 0] (y‑coord) last  row: ", g[0, -1, :, 0].tolist())
+    print("grid[:, :, 1] (x‑coord) first col: ", g[0, :, 0, 1].tolist())
+    print("grid[:, :, 1] (x‑coord) last  col: ", g[0, :, -1, 1].tolist())
