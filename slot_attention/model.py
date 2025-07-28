@@ -150,7 +150,7 @@ class SlotAttentionModel(nn.Module):
                 output_size=self.decoder_resolution[0],  # 32x32
                 broadcast_size=4,
                 feat_dim=hdim,
-                add_coords_every_layer=True,
+                add_coords_every_layer=False,
                 use_position_embed=True
             )
             self.decoder_pos_embed = None  # LatentDecoder handles position encoding internally
