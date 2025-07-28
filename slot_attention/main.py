@@ -95,7 +95,7 @@ def main():
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--visualize", action='store_true')
     parser.add_argument("--use_implicit_grads", action='store_true')
-    parser.add_argument("--n_samples", type=int, default=4, help='number of sample imgs to visualize')
+    parser.add_argument("--n_samples", type=int, default=8, help='number of sample imgs to visualize')
     parser.add_argument("--data_path",  type=str, default='Tetrominoes')
     parser.add_argument("--train_h5_path", type=str, default='tetrominoes.h5')
     parser.add_argument("--test_h5_path", type=str, default='tetrominoes_test.h5')
