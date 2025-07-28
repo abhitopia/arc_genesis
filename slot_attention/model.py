@@ -202,7 +202,25 @@ class SlotAttentionModel(nn.Module):
         dec = dec.view(B, self.num_slots, 4, *dec.shape[-2:])
 
         recon, mask_logits = torch.split(dec, [3, 1], dim=2)
-        masks = torch.softmax(mask_logits, dim=1)
+        
+        # Choose normalization based on ordered_slots setting
+        if self.ordered_slots:
+            # Stick-breaking normalization for ordered slots
+            prob = torch.sigmoid(mask_logits)  # (B, K, 1, H, W)
+            
+            # Compute cumulative product of (1 - prob)
+            cumprod = torch.cumprod(1 - prob + 1e-6, dim=1)  # (B, K, 1, H, W)
+            
+            # Prepend a "1" so cumprod_{<k} is 1 for k=0
+            ones = torch.ones_like(prob[:, :1])  # (B, 1, 1, H, W)
+            cumprod = torch.cat([ones, cumprod[:, :-1]], dim=1)  # (B, K, 1, H, W)
+            
+            # Stick-breaking: each slot gets prob[k] * prod_{j<k}(1-prob[j])
+            masks = prob * cumprod  # (B, K, 1, H, W)
+        else:
+            # Standard softmax normalization for unordered slots
+            masks = torch.softmax(mask_logits, dim=1)
+        
         recon_combined = (recon * masks).sum(dim=1)
 
         return recon_combined, recon, masks, slots
