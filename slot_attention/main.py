@@ -129,6 +129,7 @@ def main():
     parser.add_argument("--base_ch", type=int, default=64, help='base channels for encoder (default: 32)')
     parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
     parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
+    parser.add_argument("--no_encoder_pos_embed", action='store_true', help='disable encoder position embedding')
   
     args = parser.parse_args()
 
@@ -197,6 +198,7 @@ def main():
                     slot_size = args.base_ch,
                     slot_mlp_size = 2 * args.base_ch,
                     decoder_num_layers=args.decoder_num_layers,
+                    use_encoder_pos_embed=not args.no_encoder_pos_embed,
                     implicit_grads = args.use_implicit_grads)
     
     # Compile model if requested and available

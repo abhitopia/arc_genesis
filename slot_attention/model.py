@@ -101,6 +101,7 @@ class SlotAttentionModel(nn.Module):
            slot_size = 64,
            slot_mlp_size = 128,
            decoder_num_layers = 6,
+           use_encoder_pos_embed = True,
            implicit_grads = False):
 
         super().__init__()
@@ -112,6 +113,7 @@ class SlotAttentionModel(nn.Module):
         self.num_slots = num_slots
         self.decoder_num_layers = decoder_num_layers
         self.base_ch = base_ch
+        self.use_encoder_pos_embed = use_encoder_pos_embed
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -120,10 +122,13 @@ class SlotAttentionModel(nn.Module):
                                          bottleneck_hw=self.bottleneck_hw,
                                          num_conv_per_res=1)
         
-         # 2) position embedding that matches the encoder grid
-        self.enc_pos_emb = PositionEmbed(self.encoder.out_channels,
-                                         (self.bottleneck_hw, self.bottleneck_hw),
-                                         device='cuda' if torch.cuda.is_available() else 'cpu')
+         # 2) position embedding that matches the encoder grid (optional)
+        if self.use_encoder_pos_embed:
+            self.enc_pos_emb = PositionEmbed(self.encoder.out_channels,
+                                             (self.bottleneck_hw, self.bottleneck_hw),
+                                             device='cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.enc_pos_emb = None
         
         # 3) projection → Slot‑Attention (identical to your old code)
         self.norm_pre_sa = nn.LayerNorm(self.encoder.out_channels)
@@ -163,7 +168,12 @@ class SlotAttentionModel(nn.Module):
         feats = self.encoder(imgs)                              # B,C,h,w
         # print("ENCODER OUT SHAPE:", feats.shape) # expect (B, C, 8, 8)
         feats = feats.permute(0, 2, 3, 1)                       # B,h,w,C
-        feats = self.enc_pos_emb(feats).view(B, -1, feats.size(-1))
+        
+        # Apply position embedding if enabled
+        if self.enc_pos_emb is not None:
+            feats = self.enc_pos_emb(feats)
+        
+        feats = feats.view(B, -1, feats.size(-1))
         feats = self.linear_pre_sa(self.norm_pre_sa(feats))
 
         slots = self.slot_attention(feats)                      # B, K, D
