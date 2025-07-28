@@ -114,6 +114,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--restore", action='store_true')
     parser.add_argument("--restore_path", type=str, help='checkpoint path to restore')
+    parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
   
     args = parser.parse_args()
 
@@ -183,6 +184,15 @@ def main():
                     slot_mlp_size = 128,
                     decoder_resolution=(35, 35),
                     implicit_grads = args.use_implicit_grads)
+    
+    # Compile model if requested and available
+    if args.compile:
+        if hasattr(torch, 'compile'):
+            print("Compiling model with torch.compile...")
+            model = torch.compile(model)
+        else:
+            print("Warning: torch.compile not available, skipping compilation")
+    
     optimizer = optim.Adam(model.parameters(), lr = args.learning_rate)
 
     trainer = Trainer(model, optimizer, device)
