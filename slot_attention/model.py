@@ -4,6 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as dist
 
+# Import LatentDecoder from parent directory
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.modules.latent_decoder import LatentDecoder
+
 
 class SlotAttention(nn.Module):
 
@@ -93,7 +99,8 @@ class SlotAttentionModel(nn.Module):
            hdim = 32,
            slot_size = 64,
            slot_mlp_size = 128,
-           decoder_resolution=(35, 35),
+           decoder_resolution=(32, 32),
+           use_latent_decoder = False,
            implicit_grads = False):
 
         super().__init__()
@@ -103,6 +110,7 @@ class SlotAttentionModel(nn.Module):
         self.slot_size = slot_size
         self.num_slots = num_slots
         self.decoder_resolution = decoder_resolution
+        self.use_latent_decoder = use_latent_decoder
 
         modules = []
         in_dim = self.in_channels
@@ -130,18 +138,36 @@ class SlotAttentionModel(nn.Module):
                                 implicit_grads = implicit_grads
                               )
         
-        self.decoder_pos_embed = PositionEmbed(slot_size, self.decoder_resolution, device)
+        # Choose decoder type
+        if self.use_latent_decoder:
+            # Add projection layer to convert from slot_size to feat_dim
+            self.slot_projection = nn.Linear(slot_size, hdim)
+            
+            # Use LatentDecoder with 4x4 broadcast size and 32x32 output
+            self.decoder = LatentDecoder(
+                input_channels=hdim,  # Use hdim instead of slot_size
+                output_channels=4,  # RGB + mask
+                output_size=self.decoder_resolution[0],  # 32x32
+                broadcast_size=4,
+                feat_dim=hdim,
+                add_coords_every_layer=True,
+                use_position_embed=True
+            )
+            self.decoder_pos_embed = None  # LatentDecoder handles position encoding internally
+        else:
+            # Use original decoder with position embedding
+            self.decoder_pos_embed = PositionEmbed(slot_size, self.decoder_resolution, device)
+            self.slot_projection = None  # Not used with original decoder
+            
+            modules = []
+            in_dim = slot_size
+            for _ in range(num_hidden-1):
+                modules.append(nn.ConvTranspose2d(in_dim, hdim, kernel_size=5, stride=1, padding=5//2))
+                modules.append(nn.ReLU())
+                in_dim = hdim
 
-        modules = []
-        in_dim = slot_size
-        for _ in range(num_hidden-1):
-            modules.append(nn.ConvTranspose2d(in_dim, hdim, kernel_size=5, stride=1, padding=5//2))
-            modules.append(nn.ReLU())
-            in_dim = hdim
-
-        modules.append(nn.ConvTranspose2d(32, 4, kernel_size=3, stride=1, padding=3//2))
-
-        self.decoder = nn.Sequential(*modules)
+            modules.append(nn.ConvTranspose2d(32, 4, kernel_size=3, stride=1, padding=3//2))
+            self.decoder = nn.Sequential(*modules)
 
     def forward(self, x):
 
@@ -158,13 +184,21 @@ class SlotAttentionModel(nn.Module):
 
         slots = self.slot_attention(x) #shape:[batch_size, num_slots, slot_size]
 
-        x = slots.reshape(-1,1,1, self.slot_size).repeat(1, *self.decoder_resolution, 1)
-        # x has shape: [batch_size*num_slots, decoder_res[0], decoder_res[1], slot_size]
+        if self.use_latent_decoder:
+            # LatentDecoder expects 2D input: [batch_size*num_slots, hdim]
+            x = slots.reshape(-1, self.slot_size)
+            x = self.slot_projection(x)  # Project from slot_size to hdim
+            x = self.decoder(x)
+            #x has shape:[batch_size*num_slots, num_channels+1, height, width]
+        else:
+            # Original decoder with position embedding
+            x = slots.reshape(-1,1,1, self.slot_size).repeat(1, *self.decoder_resolution, 1)
+            # x has shape: [batch_size*num_slots, decoder_res[0], decoder_res[1], slot_size]
 
-        x = self.decoder_pos_embed(x)
-        x = x.permute(0, 3, 1, 2).contiguous()
-        x = self.decoder(x) 
-        #x has shape:[batch_size*num_slots, num_channels+1, height, width]
+            x = self.decoder_pos_embed(x)
+            x = x.permute(0, 3, 1, 2).contiguous()
+            x = self.decoder(x) 
+            #x has shape:[batch_size*num_slots, num_channels+1, height, width]
 
         x = x.reshape(-1, self.num_slots, num_channels+1, height, width)
 

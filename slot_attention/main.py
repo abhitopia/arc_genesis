@@ -115,6 +115,7 @@ def main():
     parser.add_argument("--restore", action='store_true')
     parser.add_argument("--restore_path", type=str, help='checkpoint path to restore')
     parser.add_argument("--compile", action='store_true', help='compile model with torch.compile for performance')
+    parser.add_argument("--use_latent_decoder", action='store_true', help='use LatentDecoder instead of original decoder')
   
     args = parser.parse_args()
 
@@ -147,8 +148,8 @@ def main():
         num_train=50000,
         num_val=2000, 
         num_test=2000,
-        min_size=35,  # Match the model's expected resolution
-        max_size=35,  # Fixed size for slot attention
+        min_size=32,  # Match the model's expected resolution
+        max_size=32,  # Fixed size for slot attention
         num_colors=10,
         is_discrete=False,  # Use RGB images
         seed=42,
@@ -174,16 +175,17 @@ def main():
                               pin_memory=True)
 
     model = SlotAttentionModel(
-                    resolution=(35, 35),
+                    resolution=(32, 32),
                     num_slots = args.num_slots,
                     num_iters = args.num_slot_iters,
                     device= device,
                     in_channels =3,
                     num_hidden = 4,
-                    hdim = 32,
+                    hdim = 64,
                     slot_size = 64,
                     slot_mlp_size = 128,
-                    decoder_resolution=(35, 35),
+                    decoder_resolution=(32, 32),
+                    use_latent_decoder=args.use_latent_decoder,
                     implicit_grads = args.use_implicit_grads)
     
     # Compile model if requested and available
