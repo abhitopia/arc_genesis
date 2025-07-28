@@ -124,3 +124,6 @@ experiments/
 
 # Registered Data
 /data/clevr_with_masks/
+
+*.ckpt
+slot_attention/results/
