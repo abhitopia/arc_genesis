@@ -145,8 +145,8 @@ def main():
     # Using RGB images (is_discrete=False) to match slot attention expectations
     config = VariableDSpritesConfig(
         num_train=50000,
-        num_val=5000, 
-        num_test=5000,
+        num_val=2000, 
+        num_test=2000,
         min_size=35,  # Match the model's expected resolution
         max_size=35,  # Fixed size for slot attention
         num_colors=10,
