@@ -16,7 +16,7 @@ from slot_attention.encoder import DownsampleEncoder
 class SlotAttention(nn.Module):
 
     def __init__(self, in_dim, slot_size, num_slots, num_iters, mlp_hdim, 
-                                                                epsilon =1e-8, implicit_grads=False):
+                                                                epsilon =1e-8, implicit_grads=False, ordered_slots=True):
 
         super().__init__()
 
@@ -25,6 +25,7 @@ class SlotAttention(nn.Module):
         self.slot_size = slot_size
         self.epsilon = epsilon
         self.implicit_grads = implicit_grads
+        self.ordered_slots = ordered_slots
 
         self.project_q = nn.Linear(slot_size, slot_size, bias=False)
         self.project_k = nn.Linear(in_dim, slot_size, bias=False)
@@ -42,8 +43,18 @@ class SlotAttention(nn.Module):
             nn.Linear(mlp_hdim, slot_size)
             )
 
-        self.slots_mu = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, self.slot_size)))
-        self.slots_logsigma = nn.Parameter(nn.init.xavier_uniform_(torch.ones( 1, self.slot_size)))
+        if self.ordered_slots:
+            # Each slot has unique mu and sigma for better specialization
+            # Systematically space slots from -1 to +1 in latent space
+            init_range = torch.linspace(-1, 1, self.num_slots).unsqueeze(-1)  # K×1
+            self.slots_mu = nn.Parameter(init_range.repeat(1, self.slot_size).unsqueeze(0))  # (1,K,D)
+            self.slots_logsigma = nn.Parameter(torch.full((1, num_slots, slot_size), -1.0)) # (1,K,D)
+            # softplus(-1) ≈ 0.3 stdev
+
+        else:
+            # Original: all slots share the same mu and sigma
+            self.slots_mu = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, self.slot_size)))
+            self.slots_logsigma = nn.Parameter(nn.init.xavier_uniform_(torch.ones( 1, self.slot_size)))
 
 
     def step(self, slots, k, v, batch_size):
@@ -75,8 +86,14 @@ class SlotAttention(nn.Module):
         k = self.project_k(x) # shape:[batch_size, num_inputs, slot_size]
         v = self.project_v(x) # shape:[batch_size, num_inputs, slot_size]
 
-        mu = self.slots_mu.repeat(batch_size, self.num_slots, 1)
-        logsigma = self.slots_logsigma.repeat(batch_size, self.num_slots, 1)
+        if self.ordered_slots:
+            # Each slot has unique parameters: (1,K,D) -> (B,K,D)
+            mu = self.slots_mu.repeat(batch_size, 1, 1)
+            logsigma = self.slots_logsigma.repeat(batch_size, 1, 1)
+        else:
+            # Original: repeat shared parameters along both batch and slot dimensions
+            mu = self.slots_mu.repeat(batch_size, self.num_slots, 1)
+            logsigma = self.slots_logsigma.repeat(batch_size, self.num_slots, 1)
         logsigma = F.softplus(logsigma) + 1e-5
         slots_dist = dist.independent.Independent(dist.Normal(loc=mu, scale=logsigma), 1)
         slots = slots_dist.rsample()
@@ -102,6 +119,7 @@ class SlotAttentionModel(nn.Module):
            slot_mlp_size = 128,
            decoder_num_layers = 6,
            use_encoder_pos_embed = True,
+           ordered_slots = True,
            implicit_grads = False):
 
         super().__init__()
@@ -114,6 +132,7 @@ class SlotAttentionModel(nn.Module):
         self.decoder_num_layers = decoder_num_layers
         self.base_ch = base_ch
         self.use_encoder_pos_embed = use_encoder_pos_embed
+        self.ordered_slots = ordered_slots
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -148,7 +167,8 @@ class SlotAttentionModel(nn.Module):
                             num_slots   = self.num_slots,
                             num_iters   = num_iters,
                             mlp_hdim    = slot_mlp_size,
-                            implicit_grads=implicit_grads)
+                            implicit_grads=implicit_grads,
+                            ordered_slots=self.ordered_slots)
 
         # 4) latent decoder – broadcast starts at **bottleneck_hw**
         self.decoder = LatentDecoder(

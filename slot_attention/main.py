@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--bottleneck_hw", type=int, default=8, help='encoder bottleneck spatial size (default: 8)')
     parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
     parser.add_argument("--no_encoder_pos_embed", action='store_true', help='disable encoder position embedding')
+    parser.add_argument("--no_ordered_slots", action='store_true', help='disable ordered slot initialization (use shared mu/sigma instead)')
   
     args = parser.parse_args()
 
@@ -199,6 +200,7 @@ def main():
                     slot_mlp_size = 2 * args.base_ch,
                     decoder_num_layers=args.decoder_num_layers,
                     use_encoder_pos_embed=not args.no_encoder_pos_embed,
+                    ordered_slots=not args.no_ordered_slots,
                     implicit_grads = args.use_implicit_grads)
     
     # Compile model if requested and available
