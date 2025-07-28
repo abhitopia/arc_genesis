@@ -147,7 +147,7 @@ def main():
     parser.add_argument("--mask_entropy_weight", type=float, default=1e-4, help='weight for mask entropy regularization (default: 1e-4)')
     parser.add_argument("--no_encoder_pos_embed", action='store_true', help='disable encoder position embedding')
     parser.add_argument("--no_ordered_slots", action='store_true', help='disable ordered slot initialization (use shared mu/sigma instead)')
-    parser.add_argument("--max_beta", type=float, default=0.0, help='maximum beta for VAE KL loss (default: 0.0, disables VAE)')
+    parser.add_argument("--max_beta", type=float, default=1e-4, help='maximum beta for VAE KL loss (default: 0.0, disables VAE)')
     parser.add_argument("--beta_warmup", type=int, default=5000, help='warmup steps for beta schedule (default: 5000)')
   
     args = parser.parse_args()
