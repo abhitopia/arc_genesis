@@ -121,15 +121,18 @@ class MultiHeadSlotAttentionImplicit(nn.Module):
         # initialise slots with learned Gaussian + noise (re‑parameterisation)
         if self.ordered_slots:
             # Each slot has unique parameters: (1,K,D) -> (B,K,D)
-            mu = self.mu.expand(B, -1, -1)
-            sigma = self.log_sigma.expand(B, -1, -1)
+            mu = self.mu[:, :K, :].expand(B, -1, -1)
+            sigma = self.log_sigma[:, :K, :].expand(B, -1, -1)
         else:
             # Original: repeat shared parameters along both batch and slot dimensions
             mu = self.mu.expand(B, K, -1)
             sigma = self.log_sigma.expand(B, K, -1)
 
-        sigma = F.softplus(sigma) + 1e-5  # Gradient-friendly softplus (as opposed to exp)
-        slots = mu + sigma * torch.randn_like(mu)
+        if self.training:
+            sigma = F.softplus(sigma) + 1e-5  # Gradient-friendly softplus (as opposed to exp)
+            slots = mu + sigma * torch.randn_like(mu)
+        else:
+            slots = mu
 
         # pre‑compute key / value projections of inputs
         x_norm = self.norm_in(x)
