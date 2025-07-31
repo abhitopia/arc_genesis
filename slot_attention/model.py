@@ -9,6 +9,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.modules.latent_decoder import LatentDecoder, PositionEmbed
+from src.modules.mh_slot_attention import MultiHeadSlotAttentionImplicit
 
 from slot_attention.encoder import DownsampleEncoder
 
@@ -122,7 +123,8 @@ class SlotAttentionModel(nn.Module):
            use_encoder_pos_embed = True,
            ordered_slots = True,
            implicit_grads = False,
-           use_vae = False):
+           use_vae = False,
+           heads = 1):
 
         super().__init__()
 
@@ -136,6 +138,7 @@ class SlotAttentionModel(nn.Module):
         self.use_encoder_pos_embed = use_encoder_pos_embed
         self.ordered_slots = ordered_slots
         self.use_vae = use_vae
+        self.heads = heads
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -151,10 +154,10 @@ class SlotAttentionModel(nn.Module):
         else:
             self.enc_pos_emb = None
         
-        # 3) projection → Slot‑Attention (identical to your old code)
+        # 3) projection → Slot‑Attention (map to slot dimensions)
         self.norm_pre_sa = nn.LayerNorm(self.encoder.out_channels)
         self.linear_pre_sa = nn.Linear(self.encoder.out_channels,
-                                       self.encoder.out_channels)
+                                       self.slot_size)
 
         # self.norm_layer = nn.LayerNorm(hdim)
         # self.pre_slot_encode = nn.Sequential(
@@ -163,12 +166,12 @@ class SlotAttentionModel(nn.Module):
         #                             nn.Linear(hdim, hdim)
         #                         )
 
-        self.slot_attention = SlotAttention(
-                            in_dim      = self.encoder.out_channels,
-                            slot_size   = self.slot_size,
+        self.slot_attention = MultiHeadSlotAttentionImplicit(
                             num_slots   = self.num_slots,
-                            num_iters   = num_iters,
-                            mlp_hdim    = slot_mlp_size,
+                            dim         = self.slot_size,
+                            heads       = self.heads,
+                            iters       = num_iters,
+                            slot_mlp_dim = slot_mlp_size,
                             implicit_grads=implicit_grads,
                             ordered_slots=self.ordered_slots)
 
