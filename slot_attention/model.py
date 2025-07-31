@@ -14,99 +14,24 @@ from src.modules.mh_slot_attention import MultiHeadSlotAttentionImplicit
 from slot_attention.encoder import DownsampleEncoder
 
 
-class SlotAttention(nn.Module):
+def stick_breaking_normalization(mask_logits: torch.Tensor) -> torch.Tensor:
+    """Stick-breaking over slot axis in log-space for stability.
+        Input:  [B,S,1,H,W] logits
+        Output: [B,S,1,H,W] masks that sum to 1
+    """
+    # Stable stick-breaking normalization using log-space computation
+    log_sig  = F.logsigmoid(mask_logits)        # log σ(z_k)
+    log_1sig = F.logsigmoid(-mask_logits)       # log (1‑σ(z_k))
 
-    def __init__(self, in_dim, slot_size, num_slots, num_iters, mlp_hdim, 
-                                                                epsilon =1e-8, implicit_grads=False, ordered_slots=True):
+    # log cumulative sum of the 'remaining stick'
+    # cum_log = [0, log(1‑σ(z0)), log(1‑σ(z0))+log(1‑σ(z1)), …]
+    cum_log  = torch.cumsum(log_1sig, dim=1)
+    cum_log  = torch.cat([torch.zeros_like(cum_log[:, :1]),   # prepend 0 for k=0
+                            cum_log[:, :-1]], dim=1)
 
-        super().__init__()
-
-        self.num_slots = num_slots
-        self.num_iters = num_iters
-        self.slot_size = slot_size
-        self.epsilon = epsilon
-        self.implicit_grads = implicit_grads
-        self.ordered_slots = ordered_slots
-
-        self.project_q = nn.Linear(slot_size, slot_size, bias=False)
-        self.project_k = nn.Linear(in_dim, slot_size, bias=False)
-        self.project_v = nn.Linear(in_dim, slot_size, bias=False)
-
-        self.norm_inputs = nn.LayerNorm(in_dim)
-        self.norm_slots = nn.LayerNorm(slot_size)
-        self.norm_mlp = nn.LayerNorm(slot_size)
-
-
-        self.gru = nn.GRUCell(slot_size, slot_size)
-        self.mlp = nn.Sequential(
-            nn.Linear(slot_size, mlp_hdim),
-            nn.ReLU(),
-            nn.Linear(mlp_hdim, slot_size)
-            )
-
-        if self.ordered_slots:
-            # Each slot has unique mu and sigma for better specialization
-            # Systematically space slots from -1 to +1 in latent space
-            init_range = torch.linspace(-1, 1, self.num_slots).unsqueeze(-1)  # K×1
-            self.slots_mu = nn.Parameter(init_range.repeat(1, self.slot_size).unsqueeze(0))  # (1,K,D)
-            self.slots_logsigma = nn.Parameter(torch.full((1, self.num_slots, self.slot_size), -1.0)) # (1,K,D)
-            # softplus(-1) ≈ 0.3 stdev
-
-        else:
-            # Original: all slots share the same mu and sigma
-            self.slots_mu = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, self.slot_size)))
-            self.slots_logsigma = nn.Parameter(nn.init.xavier_uniform_(torch.ones( 1, self.slot_size)))
-
-
-    def step(self, slots, k, v, batch_size):
-
-        slots_prev = slots
-        slots = self.norm_slots(slots)
-        q = self.project_q(slots) # shape: [batch_size, num_slots, slot_size]
-        scores = (self.slot_size ** -0.5) * torch.matmul(k, q.transpose(2, 1))
-        attn = torch.softmax(scores, dim=-1) # shape: [batch_size, num_inputs, num_slots]
-
-        #weighted mean 
-        attn = attn + self.epsilon
-        attn = attn/ torch.sum(attn, dim=1, keepdim=True) #shape: [batch_size, num_inputs, num_slots]
-
-        updates = torch.matmul(attn.transpose(2, 1), v) #shape: [batch_size, num_slots, slot_size]
-
-        slots = self.gru(updates.reshape(-1, self.slot_size), slots_prev.reshape(-1, self.slot_size))
-        slots = slots.reshape(batch_size, self.num_slots, self.slot_size)
-        slots = self.norm_mlp(slots)
-        #slots = self.mlp(slots)
-        slots = slots + self.mlp(slots)
-
-        return slots
-
-    def forward(self, x):
-
-        batch_size, num_inputs, in_dim = x.shape
-        x = self.norm_inputs(x)
-        k = self.project_k(x) # shape:[batch_size, num_inputs, slot_size]
-        v = self.project_v(x) # shape:[batch_size, num_inputs, slot_size]
-
-        if self.ordered_slots:
-            # Each slot has unique parameters: (1,K,D) -> (B,K,D)
-            mu = self.slots_mu.repeat(batch_size, 1, 1)
-            logsigma = self.slots_logsigma.repeat(batch_size, 1, 1)
-        else:
-            # Original: repeat shared parameters along both batch and slot dimensions
-            mu = self.slots_mu.repeat(batch_size, self.num_slots, 1)
-            logsigma = self.slots_logsigma.repeat(batch_size, self.num_slots, 1)
-        
-        sigma = F.softplus(logsigma) + 1e-5
-        slots_dist = dist.independent.Independent(dist.Normal(loc=mu, scale=sigma), 1)
-        slots = slots_dist.rsample()
-
-        for _ in range(self.num_iters):
-            slots = self.step(slots, k, v, batch_size)
-
-        if self.implicit_grads:
-            slots = self.step(slots.detach(), k, v, batch_size)
-
-        return slots
+    log_masks = log_sig + cum_log          # log m_k = log σ + Σ_{<k} log(1‑σ)
+    masks     = torch.exp(log_masks)       # back to probability space
+    return masks
 
 class SlotAttentionModel(nn.Module):
 
@@ -121,6 +46,7 @@ class SlotAttentionModel(nn.Module):
            slot_mlp_size = 128,
            decoder_num_layers = 6,
            use_encoder_pos_embed = True,
+           sequential = False,
            ordered_slots = True,
            implicit_grads = False,
            use_vae = False,
@@ -139,6 +65,10 @@ class SlotAttentionModel(nn.Module):
         self.ordered_slots = ordered_slots
         self.use_vae = use_vae
         self.heads = heads
+        self.sequential = sequential
+
+        if self.sequential:
+            assert self.ordered_slots, "Sequential mode requires ordered slots"
 
         # 1) encoder
         self.encoder = DownsampleEncoder(in_ch=self.in_channels,
@@ -167,7 +97,7 @@ class SlotAttentionModel(nn.Module):
         #                         )
 
         self.slot_attention = MultiHeadSlotAttentionImplicit(
-                            num_slots   = self.num_slots,
+                            num_slots   = self.num_slots if not self.sequential else 1,
                             dim         = self.slot_size,
                             heads       = self.heads,
                             iters       = num_iters,
@@ -196,7 +126,8 @@ class SlotAttentionModel(nn.Module):
                            feat_dim        = self.slot_size)            # Use slot_size for consistency
 
 
-    def forward(self, imgs):
+    def encode(self, imgs: torch.Tensor) -> torch.Tensor:
+        """B,3,H,W -> B,N,D_slot (flattened spatial features projected to slot dim)."""
         B = imgs.size(0)
 
         feats = self.encoder(imgs)                              # B,C,h,w
@@ -210,7 +141,22 @@ class SlotAttentionModel(nn.Module):
         
         feats = feats.view(B, -1, feats.size(-1))
         feats = self.linear_pre_sa(self.norm_pre_sa(feats))
+        return feats
+    
+    def decode(self, slots: torch.Tensor) -> torch.Tensor:
+        """Decode S slots to RGB and mask logits.
+           Input:  slots  [B,S,D]
+           Output: recon  [B,S,3,H,W], mask_logits [B,S,1,H,W]
+        """        
+        B, S, D = slots.shape
+        slots = slots.reshape(-1, D)   # (B*S,D)
+        dec = self.decoder(slots)
+        dec = dec.view(B, S, 4, *dec.shape[-2:])
+        recon, mask_logits = torch.split(dec, [3, 1], dim=2)
+        return recon, mask_logits
 
+    def forward_parallel(self, imgs):
+        feats = self.encode(imgs)
         slots = self.slot_attention(feats)                      # B, K, D
         
         # ----- KL regularizer (VAE) --------------------------------------
@@ -219,33 +165,93 @@ class SlotAttentionModel(nn.Module):
             vae_output = self.vae_mlp(slots)                    # B, K, 2*D
             mu_post, logvar = torch.chunk(vae_output, 2, dim=-1)  # B, K, D each
             # KL divergence from N(0,I) prior: -0.5 * sum(1 + log(σ²) - μ² - σ²)
-            kl_loss = -0.5 * (1 + logvar - mu_post.pow(2) - logvar.exp()).mean()
+
+            # Sum over slots and latent dimensions, then mean over batch
+            kl_loss = -0.5 * (1 + logvar - mu_post.pow(2) - logvar.exp()).sum(dim=(1, 2)).mean(dim=0)
         
         # ----- decode ----------------------------------------------------
-        dec = self.decoder(slots.reshape(-1, slots.size(-1)))
-        dec = dec.view(B, self.num_slots, 4, *dec.shape[-2:])
-
-        recon, mask_logits = torch.split(dec, [3, 1], dim=2)
+        recon, mask_logits = self.decode(slots)
         
         # Choose normalization based on ordered_slots setting
         if self.ordered_slots:
-            # Stable stick-breaking normalization using log-space computation
-            log_sig  = F.logsigmoid(mask_logits)        # log σ(z_k)
-            log_1sig = F.logsigmoid(-mask_logits)       # log (1‑σ(z_k))
-
-            # log cumulative sum of the 'remaining stick'
-            # cum_log = [0, log(1‑σ(z0)), log(1‑σ(z0))+log(1‑σ(z1)), …]
-            cum_log  = torch.cumsum(log_1sig, dim=1)
-            cum_log  = torch.cat([torch.zeros_like(cum_log[:, :1]),   # prepend 0 for k=0
-                                  cum_log[:, :-1]], dim=1)
-
-            log_masks = log_sig + cum_log          # log m_k = log σ + Σ_{<k} log(1‑σ)
-            masks     = torch.exp(log_masks)       # back to probability space
+            masks = stick_breaking_normalization(mask_logits)
         else:
             # Standard softmax normalization for unordered slots
             masks = torch.softmax(mask_logits, dim=1)
         
         recon_combined = (recon * masks).sum(dim=1)
-
         return recon_combined, recon, masks, slots, kl_loss
 
+
+    def forward_sequential(self, imgs: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = imgs.shape
+
+        # ================== sequential (MONet-style) path ==================
+        K = self.num_slots
+
+        # keep log_scope in float32 for stability (esp. under AMP)
+        log_scope = torch.zeros(B, 1, H, W, device=imgs.device, dtype=torch.float32)
+
+        recons = []
+        masks  = []
+        slots_list = []
+        kl_terms = []
+
+        for t in range(K):
+            # 0) Scope the image for this step: scope = exp(log_scope) (clamped for AMP)
+            scope = log_scope.clamp_min(-30.0).exp().to(imgs.dtype)   # -30 ~ 9e-14
+            scoped = imgs * scope                                     # B,3,H,W
+
+            # 1) Encode & one-slot attention
+            feats  = self.encode(scoped)                             # B,N,D_slot
+            slot_t = self.slot_attention(feats, num_slots=1)     # B,1,D
+            slots_list.append(slot_t)
+
+            # optional per-step VAE
+            if self.use_vae:
+                vae_out = self.vae_mlp(slot_t)                        # B,1,2D
+                mu_post, logvar = torch.chunk(vae_out, 2, dim=-1)
+                # Store raw KL terms without reduction for later consistency
+                kl_terms.append(-0.5 * (1 + logvar - mu_post.pow(2) - logvar.exp()))
+
+            # 2) Decode -> rgb and mask logits
+            recon_t, mask_logits_t = self.decode(slot_t)       # recon_t: B,1,3,H,W
+            recon_t = recon_t[:, 0]                                   # B,3,H,W
+            logits_t = mask_logits_t[:, 0]                            # B,1,H,W
+
+            # 3) Stick-breaking in log-space
+            log_alpha    = F.logsigmoid(logits_t)                     # log σ(z)
+            log_one_m_a  = F.logsigmoid(-logits_t)                    # log (1-σ(z))
+
+            if t < K - 1:
+                log_mask_t = log_scope + log_alpha                    # B,1,H,W
+                mask_t = log_mask_t.clamp_min(-30.0).exp().to(imgs.dtype)
+                log_scope = log_scope + log_one_m_a                   # update remaining scope
+            else:
+                # last takes the remainder exactly
+                mask_t = log_scope.clamp_min(-30.0).exp().to(imgs.dtype)
+
+            recons.append(recon_t)
+            masks.append(mask_t)
+
+        recon = torch.stack(recons, dim=1)                            # B,K,3,H,W
+        masks = torch.stack(masks,  dim=1)                            # B,K,1,H,W
+        slots = torch.cat(slots_list, dim=1)                          # B,K,D
+
+        if self.use_vae and kl_terms:
+            # Concatenate K tensors of shape [B, 1, D] along slot dimension  
+            kl_concat = torch.cat(kl_terms, dim=1)  # [B, K, D]
+            # Apply same reduction as parallel: sum over slots and latent dims, mean over batch
+            kl_loss = kl_concat.sum(dim=(1, 2)).mean(dim=0)
+        else:
+            kl_loss = torch.tensor(0.0, device=imgs.device)
+
+        recon_combined = (recon * masks).sum(dim=1)                   # B,3,H,W
+        return recon_combined, recon, masks, slots, kl_loss
+    
+
+    def forward(self, imgs):
+        if self.sequential:
+            return self.forward_sequential(imgs)
+        else:
+            return self.forward_parallel(imgs)

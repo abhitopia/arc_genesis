@@ -3,7 +3,8 @@
 - [x] Make MH Slot attention ordered
 - [x] Replace Position Embed with new PositionEmbed
 - [x] Use MultiHead Slot Attention
-- [ ] Make Slot Attention Sequential
+- [x] Make KL loss sum over slots etc, and mean over batch
+- [x] Make Slot Attention Sequential
 - [ ] Add updated visualization
 
 - [ ] Make visualisation on random samples
