@@ -1,7 +1,7 @@
 - [x] Optimize and vectorize
 - [x] Make seeding autoregressive (or use Slot Attention)
 - [x] Make MH Slot attention ordered
-- [ ] Fix Pixel Coord initialisation
+- [x] Replace Position Embed with new PositionEmbed
 - [ ] Use MultiHead Slot Attention
 - [ ] Add updated visualization
 - [ ] Make Slot Attention Sequential

@@ -8,7 +8,7 @@ import torch.distributions as dist
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.modules.latent_decoder import LatentDecoder
+from src.modules.latent_decoder import LatentDecoder, PositionEmbed
 
 from slot_attention.encoder import DownsampleEncoder
 
@@ -146,9 +146,8 @@ class SlotAttentionModel(nn.Module):
         
          # 2) position embedding that matches the encoder grid (optional)
         if self.use_encoder_pos_embed:
-            self.enc_pos_emb = PositionEmbed(self.encoder.out_channels,
-                                             (self.bottleneck_hw, self.bottleneck_hw),
-                                             device='cuda' if torch.cuda.is_available() else 'cpu')
+            self.enc_pos_emb = PositionEmbed(im_dim=self.bottleneck_hw,
+                                             feat_dim=self.encoder.out_channels)
         else:
             self.enc_pos_emb = None
         
@@ -199,11 +198,12 @@ class SlotAttentionModel(nn.Module):
 
         feats = self.encoder(imgs)                              # B,C,h,w
         # print("ENCODER OUT SHAPE:", feats.shape) # expect (B, C, 8, 8)
-        feats = feats.permute(0, 2, 3, 1)                       # B,h,w,C
         
-        # Apply position embedding if enabled
+        # Apply position embedding if enabled (before permute, while in B,C,H,W format)
         if self.enc_pos_emb is not None:
             feats = self.enc_pos_emb(feats)
+        
+        feats = feats.permute(0, 2, 3, 1)                       # B,h,w,C
         
         feats = feats.view(B, -1, feats.size(-1))
         feats = self.linear_pre_sa(self.norm_pre_sa(feats))
@@ -246,33 +246,3 @@ class SlotAttentionModel(nn.Module):
 
         return recon_combined, recon, masks, slots, kl_loss
 
-class PositionEmbed(nn.Module):
-
-    def __init__(self, hdim, resolution, device):
-        super().__init__()
-
-        self.dense = nn.Linear(4, hdim)
-        self.grid = build_grid(resolution).to(device)
-
-    def forward(self, x):
-
-        grid = self.dense(self.grid)
-        return x + grid
-
-def build_grid(resolution):
-
-    grid = torch.meshgrid(*[torch.linspace(0.0, 1.0, r) for r in resolution])
-    grid = torch.stack(grid, dim=-1)
-    grid = torch.reshape(grid, [resolution[0], resolution[1], -1])
-    grid = grid.unsqueeze(0)
-    grid = torch.cat([grid, 1.0-grid], dim=-1)
-    return grid
-
-
-if __name__ == "__main__":
-    from pprint import pprint
-    g = build_grid((8, 8))            # use the bottleneck resolution here
-    print("grid[:, :, 0] (y‑coord) first row: ", g[0, 0, :, 0].tolist())
-    print("grid[:, :, 0] (y‑coord) last  row: ", g[0, -1, :, 0].tolist())
-    print("grid[:, :, 1] (x‑coord) first col: ", g[0, :, 0, 1].tolist())
-    print("grid[:, :, 1] (x‑coord) last  col: ", g[0, :, -1, 1].tolist())
