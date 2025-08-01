@@ -149,6 +149,8 @@ def main():
     parser.add_argument("--no_ordered_slots", action='store_true', help='disable ordered slot initialization (use shared mu/sigma instead)')
     parser.add_argument("--max_beta", type=float, default=1e-4, help='maximum beta for VAE KL loss (default: 0.0, disables VAE)')
     parser.add_argument("--beta_warmup", type=int, default=5000, help='warmup steps for beta schedule (default: 5000)')
+    parser.add_argument("--heads", type=int, default=4, help='number of attention heads for multi-head slot attention (default: 4)')
+    parser.add_argument("--sequential", action='store_true', help='use sequential (MONet-style) slot attention instead of parallel')
   
     args = parser.parse_args()
 
@@ -221,9 +223,11 @@ def main():
                     slot_mlp_size = 2 * args.base_ch,
                     decoder_num_layers=args.decoder_num_layers,
                     use_encoder_pos_embed=not args.no_encoder_pos_embed,
+                    sequential=args.sequential,  # Enable sequential (MONet-style) attention
                     ordered_slots=not args.no_ordered_slots,
                     implicit_grads = args.use_implicit_grads,
-                    use_vae = use_vae)
+                    use_vae = use_vae,
+                    heads = args.heads)
     
     # Compile model if requested and available
     if args.compile:
