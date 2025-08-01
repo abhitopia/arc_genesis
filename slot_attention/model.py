@@ -180,7 +180,9 @@ class SlotAttentionModel(nn.Module):
             masks = torch.softmax(mask_logits, dim=1)
         
         recon_combined = (recon * masks).sum(dim=1)
-        return recon_combined, recon, masks, slots, kl_loss
+        # No scopes in parallel mode
+        scopes = None
+        return recon_combined, recon, masks, mask_logits, scopes, slots, kl_loss
 
 
     def forward_sequential(self, imgs: torch.Tensor) -> torch.Tensor:
@@ -194,6 +196,8 @@ class SlotAttentionModel(nn.Module):
 
         recons = []
         masks  = []
+        mask_logits_list = []
+        scopes_list = []
         slots_list = []
         kl_terms = []
 
@@ -201,6 +205,9 @@ class SlotAttentionModel(nn.Module):
             # 0) Scope the image for this step: scope = exp(log_scope) (clamped for AMP)
             scope = log_scope.clamp_min(-30.0).exp().to(imgs.dtype)   # -30 ~ 9e-14
             scoped = imgs * scope                                     # B,3,H,W
+            
+            # Store scope for visualization
+            scopes_list.append(scope)
 
             # 1) Encode & one-slot attention
             feats  = self.encode(scoped)                             # B,N,D_slot
@@ -233,9 +240,12 @@ class SlotAttentionModel(nn.Module):
 
             recons.append(recon_t)
             masks.append(mask_t)
+            mask_logits_list.append(logits_t)
 
         recon = torch.stack(recons, dim=1)                            # B,K,3,H,W
         masks = torch.stack(masks,  dim=1)                            # B,K,1,H,W
+        mask_logits = torch.stack(mask_logits_list, dim=1)            # B,K,1,H,W
+        scopes = torch.stack(scopes_list, dim=1)                      # B,K,1,H,W
         slots = torch.cat(slots_list, dim=1)                          # B,K,D
 
         if self.use_vae and kl_terms:
@@ -247,7 +257,7 @@ class SlotAttentionModel(nn.Module):
             kl_loss = torch.tensor(0.0, device=imgs.device)
 
         recon_combined = (recon * masks).sum(dim=1)                   # B,3,H,W
-        return recon_combined, recon, masks, slots, kl_loss
+        return recon_combined, recon, masks, mask_logits, scopes, slots, kl_loss
     
 
     def forward(self, imgs):

@@ -5,7 +5,8 @@
 - [x] Use MultiHead Slot Attention
 - [x] Make KL loss sum over slots etc, and mean over batch
 - [x] Make Slot Attention Sequential
-- [ ] Add updated visualization
+- [x] Add updated visualization
+- [ ] Run experiments
 
 - [ ] Make visualisation on random samples
 - [ ] Check data generation, should have more than 3 objects and variable

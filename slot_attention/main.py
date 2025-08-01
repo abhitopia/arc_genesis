@@ -49,7 +49,7 @@ class Trainer:
     def train_step(self, inputs, beta=0.0):
 
         inputs = inputs.to(self.device)
-        recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
+        recon_combined, recon, masks, mask_logits, scopes, slots, kl_loss = self.model(inputs)
         recon_loss = self.loss(recon_combined, inputs)
         
         # Compute mask entropy regularization
@@ -70,7 +70,7 @@ class Trainer:
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
-            recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
+            recon_combined, recon, masks, mask_logits, scopes, slots, kl_loss = self.model(inputs)
             recon_loss = self.loss(recon_combined, inputs)
             
             # Compute mask entropy for logging
@@ -84,9 +84,16 @@ class Trainer:
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
-            recon_combined, recon, masks, slots, kl_loss = self.model(inputs)
+            recon_combined, recon, masks, mask_logits, scopes, slots, kl_loss = self.model(inputs)
 
-        out = torch.cat(
+        batch_size, num_slots, C, H, W = recon.shape
+        
+        # Use structured layout for ordered slots (stick-breaking), simple layout for unordered (softmax)
+        use_structured_layout = mask_logits is not None and self.model.ordered_slots
+        
+        if not use_structured_layout:
+            # Fallback to original single row visualization for softmax normalization
+            out = torch.cat(
                 [
                     inputs.unsqueeze(1),  # original images
                     recon_combined.unsqueeze(1),  # reconstructions
@@ -94,10 +101,85 @@ class Trainer:
                 ],
                 dim=1,
             )
-        out = (out * 0.5 + 0.5).clamp(0, 1)
-        batch_size, num_slots, C, H, W = recon.shape
+            out = (out * 0.5 + 0.5).clamp(0, 1)
+            images = make_grid(
+                out.view(batch_size * out.shape[1], C, H, W).cpu(), normalize=False, nrow=out.shape[1],
+            )
+            return images
+        
+        # Structured layout for stick-breaking/ordered slots
+        
+        # Compute raw alphas (what each slot "thinks")
+        raw_alphas = torch.sigmoid(mask_logits)  # B, S, 1, H, W
+        
+        # Convert single-channel alphas to 3-channel for visualization (grayscale)
+        raw_alphas_rgb = raw_alphas.repeat(1, 1, 3, 1, 1)  # B, S, 3, H, W
+        
+        # Check if we're in sequential mode (has scopes)
+        is_sequential = scopes is not None
+        
+        if is_sequential:
+            # Sequential mode: 4 rows per sample
+            # Row 0: [Original,      Slot1_scope,      Slot2_scope,      ...]
+            # Row 1: [Reconstruction, Slot1_recon,     Slot2_recon,     ...]
+            # Row 2: [Padding,       Slot1_raw_alpha,  Slot2_raw_alpha,  ...]  
+            # Row 3: [Padding,       Slot1_recon×raw,  Slot2_recon×raw,  ...]
+            
+            # Convert scopes to 3-channel for visualization
+            scopes_rgb = scopes.repeat(1, 1, 3, 1, 1)  # B, S, 3, H, W
+            
+            grid = torch.zeros(batch_size, 4, num_slots + 1, C, H, W, device=inputs.device)
+            
+            # Row 0: Original + slot scopes
+            grid[:, 0, 0] = inputs  # Original images
+            grid[:, 0, 1:] = scopes_rgb  # Scopes (grayscale)
+            
+            # Row 1: Reconstruction + individual slot reconstructions
+            grid[:, 1, 0] = recon_combined  # Combined reconstruction
+            grid[:, 1, 1:] = recon  # Individual slot reconstructions
+            
+            # Row 2: Padding + raw slot alphas
+            grid[:, 2, 0] = torch.ones_like(inputs)  # White padding
+            grid[:, 2, 1:] = raw_alphas_rgb  # Raw slot alphas (grayscale)
+            
+            # Row 3: Padding + reconstruction weighted by raw alphas
+            grid[:, 3, 0] = torch.ones_like(inputs)  # White padding
+            grid[:, 3, 1:] = recon * raw_alphas + (1 - raw_alphas)  # Recon × raw alphas with white background
+            
+            num_rows = 4
+            
+        else:
+            # Parallel mode: 3 rows per sample  
+            # Row 0: [Original,       Slot1_normalized, Slot2_normalized, ...]
+            # Row 1: [Reconstruction, Slot1_raw_alpha,  Slot2_raw_alpha,  ...]  
+            # Row 2: [Padding,        Slot1_recon×raw,  Slot2_recon×raw,  ...]
+            
+            grid = torch.zeros(batch_size, 3, num_slots + 1, C, H, W, device=inputs.device)
+            
+            # Row 0: Original image + normalized slot masks
+            grid[:, 0, 0] = inputs  # Original images
+            grid[:, 0, 1:] = recon * masks + (1 - masks)  # Normalized slot masks with white background
+            
+            # Row 1: Reconstruction + raw slot alphas  
+            grid[:, 1, 0] = recon_combined  # Combined reconstruction
+            grid[:, 1, 1:] = raw_alphas_rgb  # Raw slot alphas (grayscale)
+            
+            # Row 2: Padding + reconstruction weighted by raw alphas
+            grid[:, 2, 0] = torch.ones_like(inputs)  # White padding for first column
+            grid[:, 2, 1:] = recon * raw_alphas + (1 - raw_alphas)  # Recon × raw alphas with white background
+            
+            num_rows = 3
+        
+        # Normalize to [0, 1] range
+        grid = (grid * 0.5 + 0.5).clamp(0, 1)
+        
+        # Reshape for make_grid
+        grid_reshaped = grid.view(batch_size * num_rows, num_slots + 1, C, H, W)
+        grid_flat = grid_reshaped.view(batch_size * num_rows * (num_slots + 1), C, H, W)
+        
+        # Create final grid with nrow=num_slots+1 to maintain column structure
         images = make_grid(
-            out.view(batch_size * out.shape[1], C, H, W).cpu(), normalize=False, nrow=out.shape[1],
+            grid_flat.cpu(), normalize=False, nrow=num_slots + 1,
         )
 
         return images
